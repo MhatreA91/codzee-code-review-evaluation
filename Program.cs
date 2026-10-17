@@ -13,8 +13,21 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 // EF Core: SQL Server via connection string in appsettings.json (no hardcoded credentials).
-builder.Services.AddDbContext<EmployeeDbContext>(options =>
-    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+// The Testing environment swaps in the InMemory provider for WebApplicationFactory integration tests.
+// TESTING_DB_NAME gives each factory a unique isolated database.
+if (builder.Environment.IsEnvironment("Testing"))
+{
+    var testDb = builder.Configuration.GetValue<string>("TESTING_DB_NAME")
+        ?? Environment.GetEnvironmentVariable("TESTING_DB_NAME")
+        ?? "Employee_Api_Testing";
+    builder.Services.AddDbContext<EmployeeDbContext>(options =>
+        options.UseInMemoryDatabase(testDb));
+}
+else
+{
+    builder.Services.AddDbContext<EmployeeDbContext>(options =>
+        options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+}
 
 // Repository + Service layer DI
 builder.Services.AddScoped<IEmployeeRepository, EmployeeRepository>();
@@ -46,4 +59,10 @@ app.UseAuthorization();
 app.MapControllers();
 
 app.Run();
+
+/// <summary>
+/// Testability hook only — exposes the top-level-statements entry point to
+/// <c>WebApplicationFactory&lt;Program&gt;</c>. No runtime behavior change.
+/// </summary>
+public partial class Program { }
 

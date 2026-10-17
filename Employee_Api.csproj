@@ -4,6 +4,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Test project lives under this folder; exclude it from the API compilation. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);Employee_Api.Tests/**/*</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>
@@ -12,6 +14,8 @@
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.3" />
+    <!-- Test-only provider: used solely by the Testing-environment branch in Program.cs. -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="10.0.3" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="10.3.0" />
   </ItemGroup>
 
