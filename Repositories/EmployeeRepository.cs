@@ -24,6 +24,30 @@ public class EmployeeRepository : IEmployeeRepository
             .ToListAsync(cancellationToken);
     }
 
+    public async Task<(List<Employee> Items, int TotalCount)> GetPagedAsync(string? department, int pageNumber, int pageSize, CancellationToken cancellationToken = default)
+    {
+        IQueryable<Employee> query = _context.Employees.AsNoTracking();
+
+        // Filtering applied before ordering/pagination.
+        if (!string.IsNullOrWhiteSpace(department))
+        {
+            var dept = department.Trim();
+            query = query.Where(e => e.Department == dept);
+        }
+
+        // Deterministic ordering required for stable pagination.
+        query = query.OrderBy(e => e.EmployeeId);
+
+        var totalCount = await query.CountAsync(cancellationToken);
+
+        var items = await query
+            .Skip((pageNumber - 1) * pageSize)
+            .Take(pageSize)
+            .ToListAsync(cancellationToken);
+
+        return (items, totalCount);
+    }
+
     public async Task<Employee?> GetByIdAsync(int id, CancellationToken cancellationToken = default)
     {
         return await _context.Employees

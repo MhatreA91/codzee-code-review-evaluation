@@ -18,13 +18,28 @@ public class EmployeesController : ControllerBase
         _service = service;
     }
 
-    // GET /api/employees
+    // GET /api/employees?pageNumber=1&pageSize=10&department=HR
     [HttpGet]
-    [ProducesResponseType(typeof(IEnumerable<EmployeeDto>), StatusCodes.Status200OK)]
-    public async Task<ActionResult<IEnumerable<EmployeeDto>>> GetAll(CancellationToken cancellationToken)
+    [ProducesResponseType(typeof(PagedResult<EmployeeDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<PagedResult<EmployeeDto>>> GetAll(
+        [FromQuery] int pageNumber = 1,
+        [FromQuery] int pageSize = 10,
+        [FromQuery] string? department = null,
+        CancellationToken cancellationToken = default)
     {
-        var employees = await _service.GetAllAsync(cancellationToken);
-        return Ok(employees);
+        if (pageNumber < 1)
+        {
+            return BadRequest(new { message = "pageNumber must be >= 1." });
+        }
+
+        if (pageSize < 1 || pageSize > 100)
+        {
+            return BadRequest(new { message = "pageSize must be between 1 and 100." });
+        }
+
+        var result = await _service.GetPagedAsync(department, pageNumber, pageSize, cancellationToken);
+        return Ok(result);
     }
 
     // GET /api/employees/{id}
