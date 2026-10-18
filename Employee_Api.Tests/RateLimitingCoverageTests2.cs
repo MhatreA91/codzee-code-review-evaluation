@@ -109,6 +109,26 @@ public class RateLimitingCoverageTests2
     }
 
     [Fact]
+    public async Task ForwardedHeaders_Defaults_Do_Not_Trust_Every_Proxy()
+    {
+        // Security lock: without configured KnownProxies/KnownNetworks the
+        // defaults must still trust only loopback, so a direct client cannot
+        // spoof X-Forwarded-For to dodge the per-IP rate limit.
+        using var factory = new NullIpFactory();
+        var options = factory.Services.GetRequiredService<IOptions<ForwardedHeadersOptions>>().Value;
+#if NET10_0_OR_GREATER
+        Assert.DoesNotContain(
+            options.KnownIPNetworks,
+            n => n.PrefixLength == 0 && System.Net.IPAddress.Parse("0.0.0.0").Equals(n.BaseAddress));
+#else
+        Assert.Empty(options.KnownNetworks);
+#endif
+        Assert.DoesNotContain(
+            options.KnownProxies,
+            ip => ip.Equals(System.Net.IPAddress.Any) || ip.Equals(System.Net.IPAddress.IPv6Any));
+    }
+
+    [Fact]
     public void Base_Config_PermitLimit_Is_Production_Safe()
     {
         // Guards the codzee finding: the base appsettings.json must not ship
@@ -158,11 +178,14 @@ public class RateLimitingCoverageTests2
         Assert.Equal(HttpStatusCode.TooManyRequests, last);
     }
 
-    private static Task<HttpResponseMessage> SendWithForwardedForAsync(HttpClient client, string ip)
+    private static async Task<HttpResponseMessage> SendWithForwardedForAsync(HttpClient client, string ip)
     {
+        // async + await: keeps the HttpRequestMessage alive until SendAsync
+        // finishes. Returning the bare task from a `using var request` method
+        // would dispose the request while the send is still in flight (race).
         using var request = new HttpRequestMessage(HttpMethod.Get, "/api/employees?pageNumber=1&pageSize=1");
         request.Headers.TryAddWithoutValidation("X-Forwarded-For", ip);
         request.Headers.TryAddWithoutValidation("X-Forwarded-Proto", "https");
-        return client.SendAsync(request);
+        return await client.SendAsync(request);
     }
 }

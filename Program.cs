@@ -41,23 +41,66 @@ else
 builder.Services.AddScoped<IEmployeeRepository, EmployeeRepository>();
 builder.Services.AddScoped<IEmployeeService, EmployeeService>();
 
-// Trust X-Forwarded-For / X-Forwarded-Proto from reverse proxies / load
-// balancers so Connection.RemoteIpAddress reflects the real client IP.
+// Trust X-Forwarded-For / X-Forwarded-Proto ONLY from known proxies /
+// networks so Connection.RemoteIpAddress reflects the real client IP.
 // This keeps the per-IP rate-limit partition from collapsing all clients
-// behind a proxy into a single bucket. KnownNetworks/KnownProxies are
-// cleared so any upstream proxy is honored (typical for container / LB
-// deployments); if the app is directly internet-facing, restrict these to
-// your proxy IPs instead to avoid spoofed X-Forwarded-For headers.
+// behind a proxy into a single bucket. The ASP.NET Core default trusts
+// loopback proxies only — we KEEP that default and only ADD proxies from
+// "ForwardedHeaders:KnownProxies" / "ForwardedHeaders:KnownNetworks"
+// configuration. Never Clear() KnownProxies/KnownIPNetworks: clearing would
+// trust X-Forwarded-* from any direct caller, letting a client rotate
+// X-Forwarded-For to get a fresh rate-limit bucket per request (bypassing
+// the limit) and spoof X-Forwarded-Proto:https to skip HTTPS redirection.
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
     options.ForwardedHeaders =
         ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+
+    foreach (var entry in builder.Configuration.GetSection("ForwardedHeaders:KnownProxies").Get<string[]>() ?? [])
+    {
+        if (System.Net.IPAddress.TryParse(entry?.Trim(), out var proxyIp))
+        {
+            options.KnownProxies.Add(proxyIp);
+        }
+    }
+
+    foreach (var entry in builder.Configuration.GetSection("ForwardedHeaders:KnownNetworks").Get<string[]>() ?? [])
+    {
+        if (string.IsNullOrWhiteSpace(entry))
+        {
+            continue;
+        }
+
+        try
+        {
+            var cidr = entry.Trim();
 #if NET10_0_OR_GREATER
-    options.KnownIPNetworks.Clear();
+            if (cidr.Contains('/'))
+            {
+                options.KnownIPNetworks.Add(System.Net.IPNetwork.Parse(cidr));
+            }
+            else if (System.Net.IPAddress.TryParse(cidr, out var netIp))
+            {
+                options.KnownIPNetworks.Add(new System.Net.IPNetwork(
+                    netIp,
+                    netIp.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? 32 : 128));
+            }
 #else
-    options.KnownNetworks.Clear();
+            var parts = cidr.Split('/', 2);
+            if (System.Net.IPAddress.TryParse(parts[0].Trim(), out var networkIp))
+            {
+                var prefix = parts.Length > 1 && int.TryParse(parts[1].Trim(), out var p)
+                    ? p
+                    : (networkIp.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? 32 : 128);
+                options.KnownNetworks.Add(new IPNetwork(networkIp, prefix));
+            }
 #endif
-    options.KnownProxies.Clear();
+        }
+        catch
+        {
+            // Ignore malformed network entries; fail-closed (untrusted).
+        }
+    }
 });
 
 builder.Services.AddRateLimiter(options =>
