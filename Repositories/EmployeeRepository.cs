@@ -41,7 +41,7 @@ public class EmployeeRepository : IEmployeeRepository
         var totalCount = await query.CountAsync(cancellationToken);
 
         var items = await query
-            .Skip((pageNumber - 1) * pageSize)
+            .Skip((int)Math.Min((long)(pageNumber - 1) * pageSize, int.MaxValue))
             .Take(pageSize)
             .ToListAsync(cancellationToken);
 
