@@ -2,10 +2,15 @@ using Employee_Api.Data;
 using Employee_Api.Repositories;
 using Employee_Api.Services;
 using Microsoft.EntityFrameworkCore;
-
+using Microsoft.AspNetCore.RateLimiting;
+using System.Globalization;
+using System.Threading.RateLimiting;
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
+var permitLimit = builder.Configuration.GetValue<int>("RateLimiting:PermitLimit", 10);
+var windowInSeconds = builder.Configuration.GetValue<int>("RateLimiting:WindowInSeconds", 60);
+var queueLimit = builder.Configuration.GetValue<int>("RateLimiting:QueueLimit", 0);
 
 builder.Services.AddControllers();
 // Swagger generator (Swashbuckle) — single docs source.
@@ -33,6 +38,38 @@ else
 builder.Services.AddScoped<IEmployeeRepository, EmployeeRepository>();
 builder.Services.AddScoped<IEmployeeService, EmployeeService>();
 
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    options.OnRejected = async (context, cancellationToken) =>
+    {
+        if (context.Lease.TryGetMetadata(
+            MetadataName.RetryAfter, out var retryAfter))
+        {
+            context.HttpContext.Response.Headers.RetryAfter =
+                Math.Ceiling(retryAfter.TotalSeconds)
+                    .ToString(CultureInfo.InvariantCulture);
+        }
+
+        await context.HttpContext.Response.WriteAsync(
+            "Too many requests. Please try again later.",
+            cancellationToken);
+    };
+
+    options.AddPolicy("EmployeeApiPolicy", httpContext =>
+    {
+        var clientIp = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        return RateLimitPartition.GetFixedWindowLimiter(clientIp, _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = permitLimit,
+            Window = TimeSpan.FromSeconds(windowInSeconds),            
+            QueueLimit = queueLimit,
+            AutoReplenishment = true
+    }); 
+    });
+});
+
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.
@@ -55,6 +92,8 @@ if (app.Urls.Any(u => u.StartsWith("https://", StringComparison.OrdinalIgnoreCas
 }
 
 app.UseAuthorization();
+
+app.UseRateLimiter();
 
 app.MapControllers();
 

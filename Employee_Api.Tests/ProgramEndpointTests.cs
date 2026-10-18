@@ -4,6 +4,7 @@ using System.Text.Json;
 using Employee_Api.Data;
 using Employee_Api.DTOs;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Employee_Api.Tests;
@@ -12,6 +13,17 @@ public class ProgramIntegrationTests
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
 
+    private static void GuardAgainstRelationalProvider(EmployeeDbContext context, string caller)
+    {
+        if (!context.Database.IsInMemory())
+        {
+            throw new InvalidOperationException(
+                $"SAFETY: refusing to seed/reset a non-InMemory database in test '{caller}'. " +
+                $"Provider: {context.Database.ProviderName}. " +
+                "Integration tests must only use the InMemory provider.");
+        }
+    }
+
     private static (TestApiFactory factory, System.Net.Http.HttpClient client) CreateSeededClient(string environment = "Testing")
     {
         var factory = new TestApiFactory(environment);
@@ -19,6 +31,7 @@ public class ProgramIntegrationTests
         {
             using var scope = factory.Services.CreateScope();
             var context = scope.ServiceProvider.GetRequiredService<EmployeeDbContext>();
+            GuardAgainstRelationalProvider(context, nameof(CreateSeededClient));
             context.Database.EnsureDeleted();
             context.Database.EnsureCreated();
             if (!context.Employees.Any())

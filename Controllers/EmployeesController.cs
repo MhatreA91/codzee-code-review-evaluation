@@ -1,12 +1,13 @@
 using Employee_Api.DTOs;
 using Employee_Api.Services;
 using Microsoft.AspNetCore.Mvc;
-
+using Microsoft.AspNetCore.RateLimiting;
 namespace Employee_Api.Controllers;
 
 /// <summary>
 /// Employee CRUD endpoints. Uses DTOs only — entity never exposed.
 /// </summary>
+[EnableRateLimiting("EmployeeApiPolicy")]
 [ApiController]
 [Route("api/[controller]")]
 public class EmployeesController : ControllerBase
