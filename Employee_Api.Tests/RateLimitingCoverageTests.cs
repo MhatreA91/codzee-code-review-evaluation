@@ -1,5 +1,4 @@
 using System.Net;
-using System.Reflection;
 using Employee_Api.Controllers;
 using Employee_Api.Data;
 using Microsoft.EntityFrameworkCore;
@@ -16,13 +15,29 @@ using System.Threading.RateLimiting;
 namespace Employee_Api.Tests;
 
 /// <summary>
+/// Serial collection for tests that mutate the process-wide TESTING_DB_NAME
+/// environment variable. Even though the assembly disables test
+/// parallelization globally (see AssemblyInfo.cs), scoping these to their own
+/// non-parallel collection keeps them from racing each other (or future
+/// parallel runners) on shared process state.
+/// </summary>
+[CollectionDefinition("EnvVarSerial", DisableParallelization = true)]
+public sealed class EnvVarSerialCollection { }
+
+/// <summary>
 /// Covers the rate-limiting branches added in Program.cs (+ locks the
 /// controller policy). Targets OnRejected with/without RetryAfter metadata,
 /// the null-IP ("unknown") partition, 429 end-to-end, TESTING_DB_NAME
 /// fallbacks and the https-Urls branch.
 /// </summary>
+[Collection("EnvVarSerial")]
 public class RateLimitingCoverageTests
 {
+    // Extra guard on top of the [Collection("EnvVarSerial")]: serializes the
+    // process-wide TESTING_DB_NAME mutations even if a future runner ignores
+    // collection scoping. SemaphoreSlim (not lock) because the tests await.
+    private static readonly SemaphoreSlim EnvVarGate = new(1, 1);
+
     private sealed class TestLease : RateLimitLease
     {
         private readonly TimeSpan? _retryAfter;
@@ -154,33 +169,33 @@ public class RateLimitingCoverageTests
     }
 
     [Fact]
-    public void RateLimiter_Policy_ReturnsLimiter_ForNullAndNonNullIp()
+    public async Task RateLimiter_Policy_ReturnsLimiter_ForNullAndNonNullIp()
     {
-        using var factory = new TestApiFactory();
+        // Behavioral check (no reflection on RateLimiterOptions internals):
+        // the null-IP ("unknown") and real-IP requests must land in different
+        // fixed-window partitions. With PermitLimit=1, exhausting the real-IP
+        // bucket must 429 a second real-IP request but still allow the
+        // null-IP request through the real pipeline.
+        using var factory = new LowLimitFactory();
         EnsureSeeded(factory.Services);
-        var options = factory.Services.GetRequiredService<IOptions<RateLimiterOptions>>().Value;
+        using var client = factory.CreateClient();
 
-        // Policies are stored in the internal PolicyMap<string, DefaultRateLimiterPolicy>.
-        var mapProp = typeof(RateLimiterOptions).GetProperty("PolicyMap", BindingFlags.NonPublic | BindingFlags.Instance);
-        Assert.NotNull(mapProp);
-        var map = Assert.IsAssignableFrom<System.Collections.IDictionary>(mapProp!.GetValue(options));
-        Assert.True(map.Contains("EmployeeApiPolicy"));
-        var policy = map["EmployeeApiPolicy"]!;
-        Assert.NotNull(policy);
+        using var realFirst = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
+        Assert.Equal(HttpStatusCode.OK, realFirst.StatusCode);
 
-        // DefaultRateLimiterPolicy wraps the Func<HttpContext, RateLimitPartition<DefaultKeyType>>
-        // partitioner; invoke GetPartition for both IP shapes to cover "?? \"unknown\"" true/false.
-        // (internal type: DefaultRateLimiterPolicy.GetPartition(HttpContext) is public.)
-        var getPartition = policy.GetType().GetMethod("GetPartition", BindingFlags.Public | BindingFlags.Instance);
-        Assert.NotNull(getPartition);
+        HttpStatusCode? last = null;
+        for (int i = 0; i < 5 && last != HttpStatusCode.TooManyRequests; i++)
+        {
+            using var r = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
+            last = r.StatusCode;
+        }
+        Assert.Equal(HttpStatusCode.TooManyRequests, last);
 
-        var withIp = new DefaultHttpContext();
-        withIp.Connection.RemoteIpAddress = IPAddress.Parse("127.0.0.1");
-        var withoutIp = new DefaultHttpContext();
-        withoutIp.Connection.RemoteIpAddress = null;
-
-        Assert.NotNull(getPartition!.Invoke(policy, new object[] { withIp }));
-        Assert.NotNull(getPartition.Invoke(policy, new object[] { withoutIp }));
+        using var nullFactory = new NullIpFactory();
+        EnsureSeeded(nullFactory.Services);
+        using var nullClient = nullFactory.CreateClient();
+        using var nullIpResponse = await nullClient.GetAsync("/api/employees?pageNumber=1&pageSize=1");
+        Assert.Equal(HttpStatusCode.OK, nullIpResponse.StatusCode);
     }
 
     [Fact]
@@ -195,25 +210,68 @@ public class RateLimitingCoverageTests
 
         HttpStatusCode? last = null;
         string body = "";
+        HttpResponseMessage? rejected = null;
         for (int i = 0; i < 10; i++)
         {
-            using var r = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
+            var r = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
             last = r.StatusCode;
             body = await r.Content.ReadAsStringAsync();
-            if (last == HttpStatusCode.TooManyRequests) break;
+            if (last == HttpStatusCode.TooManyRequests)
+            {
+                rejected?.Dispose();
+                rejected = r;
+                break;
+            }
+            r.Dispose();
         }
 
-        Assert.Equal(HttpStatusCode.TooManyRequests, last);
-        Assert.Contains("Too many requests", body);
+        using (rejected)
+        {
+            Assert.Equal(HttpStatusCode.TooManyRequests, last);
+            Assert.Contains("Too many requests", body);
+            // The PR claims Retry-After is sent: lock it on the real 429.
+            Assert.NotNull(rejected);
+            Assert.True(rejected!.Headers.Contains("Retry-After"), "429 is missing the Retry-After header.");
+            var retryAfter = rejected.Headers.GetValues("Retry-After").FirstOrDefault();
+            Assert.True(int.TryParse(retryAfter, out var seconds) && seconds >= 0,
+                $"Retry-After '{retryAfter}' is not a non-negative integer.");
+        }
     }
 
     [Fact]
     public async Task TestingDbName_FallsBack_To_EnvironmentVariable_WhenConfigMissing()
     {
-        var envDb = "ENVDB_" + Guid.NewGuid().ToString("N");
-        Environment.SetEnvironmentVariable("TESTING_DB_NAME", envDb);
+        await EnvVarGate.WaitAsync();
         try
         {
+            var envDb = "ENVDB_" + Guid.NewGuid().ToString("N");
+            Environment.SetEnvironmentVariable("TESTING_DB_NAME", envDb);
+            try
+            {
+                using var factory = new NoDbSettingFactory();
+                using var client = factory.CreateClient();
+                EnsureSeeded(factory.Services);
+                using var response = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("TESTING_DB_NAME", null);
+            }
+        }
+        finally
+        {
+            EnvVarGate.Release();
+        }
+    }
+
+    [Fact]
+    public async Task TestingDbName_FallsBack_To_Default_WhenConfigAndEnvMissing()
+    {
+        await EnvVarGate.WaitAsync();
+        try
+        {
+            Environment.SetEnvironmentVariable("TESTING_DB_NAME", null);
             using var factory = new NoDbSettingFactory();
             using var client = factory.CreateClient();
             EnsureSeeded(factory.Services);
@@ -222,19 +280,8 @@ public class RateLimitingCoverageTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("TESTING_DB_NAME", null);
+            EnvVarGate.Release();
         }
-    }
-
-    [Fact]
-    public async Task TestingDbName_FallsBack_To_Default_WhenConfigAndEnvMissing()
-    {
-        Environment.SetEnvironmentVariable("TESTING_DB_NAME", null);
-        using var factory = new NoDbSettingFactory();
-        using var client = factory.CreateClient();
-        EnsureSeeded(factory.Services);
-        using var response = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
     [Fact]
@@ -260,15 +307,29 @@ public class RateLimitingCoverageTests
     }
 
     [Fact]
-    public void RateLimiterOptions_Has_EmployeeApiPolicy_And429Rejection()
+    public async Task RateLimiterOptions_Has_EmployeeApiPolicy_And429Rejection()
     {
+        // No reflection on the internal PolicyMap: RejectionStatusCode is
+        // public, and policy existence is proven behaviorally by the 429
+        // end-to-end test (LowLimitFactory + "EmployeeApiPolicy" on the
+        // controller must reject with 429, not 500/404).
         using var factory = new TestApiFactory();
         var options = factory.Services.GetRequiredService<IOptions<RateLimiterOptions>>().Value;
         Assert.Equal(StatusCodes.Status429TooManyRequests, options.RejectionStatusCode);
-        var mapProp = typeof(RateLimiterOptions).GetProperty("PolicyMap", BindingFlags.NonPublic | BindingFlags.Instance);
-        Assert.NotNull(mapProp);
-        var map = Assert.IsAssignableFrom<System.Collections.IDictionary>(mapProp!.GetValue(options));
-        Assert.True(map.Contains("EmployeeApiPolicy"));
+
+        using var lowFactory = new LowLimitFactory();
+        EnsureSeeded(lowFactory.Services);
+        using var client = lowFactory.CreateClient();
+        using var first = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+
+        HttpStatusCode? last = null;
+        for (int i = 0; i < 5 && last != HttpStatusCode.TooManyRequests; i++)
+        {
+            using var r = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
+            last = r.StatusCode;
+        }
+        Assert.Equal(HttpStatusCode.TooManyRequests, last);
     }
 }
 

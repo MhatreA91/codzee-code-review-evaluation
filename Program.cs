@@ -2,13 +2,16 @@ using Employee_Api.Data;
 using Employee_Api.Repositories;
 using Employee_Api.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 using System.Globalization;
 using System.Threading.RateLimiting;
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
-var permitLimit = builder.Configuration.GetValue<int>("RateLimiting:PermitLimit", 10);
+// Defaults are production-safe (100 req/min/IP); Development override in
+// appsettings.Development.json keeps a strict 2 req/min for local testing.
+var permitLimit = builder.Configuration.GetValue<int>("RateLimiting:PermitLimit", 100);
 var windowInSeconds = builder.Configuration.GetValue<int>("RateLimiting:WindowInSeconds", 60);
 var queueLimit = builder.Configuration.GetValue<int>("RateLimiting:QueueLimit", 0);
 
@@ -37,6 +40,25 @@ else
 // Repository + Service layer DI
 builder.Services.AddScoped<IEmployeeRepository, EmployeeRepository>();
 builder.Services.AddScoped<IEmployeeService, EmployeeService>();
+
+// Trust X-Forwarded-For / X-Forwarded-Proto from reverse proxies / load
+// balancers so Connection.RemoteIpAddress reflects the real client IP.
+// This keeps the per-IP rate-limit partition from collapsing all clients
+// behind a proxy into a single bucket. KnownNetworks/KnownProxies are
+// cleared so any upstream proxy is honored (typical for container / LB
+// deployments); if the app is directly internet-facing, restrict these to
+// your proxy IPs instead to avoid spoofed X-Forwarded-For headers.
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders =
+        ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+#if NET10_0_OR_GREATER
+    options.KnownIPNetworks.Clear();
+#else
+    options.KnownNetworks.Clear();
+#endif
+    options.KnownProxies.Clear();
+});
 
 builder.Services.AddRateLimiter(options =>
 {
@@ -71,6 +93,11 @@ builder.Services.AddRateLimiter(options =>
 });
 
 var app = builder.Build();
+
+// Must run first: rewrites RemoteIpAddress/Scheme from X-Forwarded-*
+// before auth, rate limiting, and routing see the request. Otherwise the
+// rate-limit partition still sees the proxy IP.
+app.UseForwardedHeaders();
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
