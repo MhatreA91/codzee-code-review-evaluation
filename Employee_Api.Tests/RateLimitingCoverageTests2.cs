@@ -111,10 +111,15 @@ public class RateLimitingCoverageTests2
     private sealed class ForwardedHeadersFactory : WebApplicationFactory<Program>
     {
         private readonly string _dbName = "RLFWDV_" + Guid.NewGuid().ToString("N");
-        private readonly string _proxies;
-        private readonly string _networks;
+        private readonly string[] _proxies;
+        private readonly string[] _networks;
 
         public ForwardedHeadersFactory(string proxies, string networks)
+            : this([proxies], [networks])
+        {
+        }
+
+        public ForwardedHeadersFactory(string[] proxies, string[] networks)
         {
             _proxies = proxies;
             _networks = networks;
@@ -124,8 +129,14 @@ public class RateLimitingCoverageTests2
         {
             builder.UseEnvironment("Testing");
             builder.UseSetting("TESTING_DB_NAME", _dbName);
-            builder.UseSetting("ForwardedHeaders:KnownProxies:0", _proxies);
-            builder.UseSetting("ForwardedHeaders:KnownNetworks:0", _networks);
+            for (int i = 0; i < _proxies.Length; i++)
+            {
+                builder.UseSetting($"ForwardedHeaders:KnownProxies:{i}", _proxies[i]);
+            }
+            for (int i = 0; i < _networks.Length; i++)
+            {
+                builder.UseSetting($"ForwardedHeaders:KnownNetworks:{i}", _networks[i]);
+            }
         }
     }
 
@@ -152,6 +163,50 @@ public class RateLimitingCoverageTests2
             factory.CreateClient();
         });
         Assert.Contains("ForwardedHeaders:KnownNetworks", ex.Message);
+    }
+
+    [Fact]
+    public void ForwardedHeaders_Valid_Config_Reaches_Options()
+    {
+        // Happy path for the top-level parsing: a valid proxy IP and CIDR
+        // must land in ForwardedHeadersOptions. If the copy loop broke,
+        // every proxied client would share one rate-limit bucket.
+        using var factory = new ForwardedHeadersFactory("10.0.0.10", "10.0.0.0/8");
+        var options = factory.Services.GetRequiredService<IOptions<ForwardedHeadersOptions>>().Value;
+        Assert.Contains(System.Net.IPAddress.Parse("10.0.0.10"), options.KnownProxies);
+#if NET10_0_OR_GREATER
+        Assert.Contains(
+            options.KnownIPNetworks,
+            n => n.BaseAddress.Equals(System.Net.IPAddress.Parse("10.0.0.0")) && n.PrefixLength == 8);
+#else
+        Assert.Contains(
+            options.KnownNetworks,
+            n => n.Address.Equals(System.Net.IPAddress.Parse("10.0.0.0")) && n.PrefixLength == 8);
+#endif
+    }
+
+    [Fact]
+    public void ForwardedHeaders_Bare_Ip_In_KnownNetworks_Becomes_Single_Host_Network()
+    {
+        // A bare IP (no "/prefix") in KnownNetworks must become a /32 (IPv4)
+        // or /128 (IPv6) single-host network rather than being dropped.
+        using var factory = new ForwardedHeadersFactory([], ["192.168.1.50", "2001:db8::7"]);
+        var options = factory.Services.GetRequiredService<IOptions<ForwardedHeadersOptions>>().Value;
+#if NET10_0_OR_GREATER
+        Assert.Contains(
+            options.KnownIPNetworks,
+            n => n.BaseAddress.Equals(System.Net.IPAddress.Parse("192.168.1.50")) && n.PrefixLength == 32);
+        Assert.Contains(
+            options.KnownIPNetworks,
+            n => n.BaseAddress.Equals(System.Net.IPAddress.Parse("2001:db8::7")) && n.PrefixLength == 128);
+#else
+        Assert.Contains(
+            options.KnownNetworks,
+            n => n.Address.Equals(System.Net.IPAddress.Parse("192.168.1.50")) && n.PrefixLength == 32);
+        Assert.Contains(
+            options.KnownNetworks,
+            n => n.Address.Equals(System.Net.IPAddress.Parse("2001:db8::7")) && n.PrefixLength == 128);
+#endif
     }
 
     [Fact]
