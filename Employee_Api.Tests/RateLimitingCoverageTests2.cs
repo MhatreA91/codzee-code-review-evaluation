@@ -108,6 +108,52 @@ public class RateLimitingCoverageTests2
         Assert.True(options.ForwardedHeaders.HasFlag(ForwardedHeaders.XForwardedProto));
     }
 
+    private sealed class ForwardedHeadersFactory : WebApplicationFactory<Program>
+    {
+        private readonly string _dbName = "RLFWDV_" + Guid.NewGuid().ToString("N");
+        private readonly string _proxies;
+        private readonly string _networks;
+
+        public ForwardedHeadersFactory(string proxies, string networks)
+        {
+            _proxies = proxies;
+            _networks = networks;
+        }
+
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            builder.UseEnvironment("Testing");
+            builder.UseSetting("TESTING_DB_NAME", _dbName);
+            builder.UseSetting("ForwardedHeaders:KnownProxies:0", _proxies);
+            builder.UseSetting("ForwardedHeaders:KnownNetworks:0", _networks);
+        }
+    }
+
+    [Fact]
+    public void ForwardedHeaders_Invalid_Proxy_Fails_Startup_Loudly()
+    {
+        // A typo'd proxy IP must fail fast with a clear message, not silently
+        // leave the real proxy untrusted (which would collapse every client
+        // into one rate-limit bucket with nothing saying why).
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+        {
+            using var factory = new ForwardedHeadersFactory("not-an-ip", "10.0.0.0/8");
+            factory.CreateClient();
+        });
+        Assert.Contains("ForwardedHeaders:KnownProxies", ex.Message);
+    }
+
+    [Fact]
+    public void ForwardedHeaders_Invalid_Network_Fails_Startup_Loudly()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+        {
+            using var factory = new ForwardedHeadersFactory("10.0.0.10", "not-a-cidr");
+            factory.CreateClient();
+        });
+        Assert.Contains("ForwardedHeaders:KnownNetworks", ex.Message);
+    }
+
     [Fact]
     public async Task ForwardedHeaders_Defaults_Do_Not_Trust_Every_Proxy()
     {
