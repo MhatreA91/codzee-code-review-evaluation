@@ -13,6 +13,10 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 // EF Core: SQL Server via connection string in appsettings.json (no hardcoded credentials).
+// NOTE: there is intentionally no "Testing"-environment branch here. The app always
+// uses the production provider; integration tests override EmployeeDbContext to an
+// isolated InMemory database inside TestApiFactory (test project only), so a stray
+// ASPNETCORE_ENVIRONMENT=Testing can never silently swap a deployed app to InMemory.
 builder.Services.AddDbContext<EmployeeDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
 
@@ -46,4 +50,10 @@ app.UseAuthorization();
 app.MapControllers();
 
 app.Run();
+
+/// <summary>
+/// Testability hook only — exposes the top-level-statements entry point to
+/// <c>WebApplicationFactory&lt;Program&gt;</c>. No runtime behavior change.
+/// </summary>
+public partial class Program { }
 

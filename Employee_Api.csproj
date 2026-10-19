@@ -4,6 +4,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Test project lives under this folder; exclude it from the API compilation. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);Employee_Api.Tests/**/*</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>

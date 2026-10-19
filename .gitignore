@@ -15,4 +15,10 @@ obj/
 .env
 .env.*
 !.env.example
+
+# Test results
+TestResults/
+
+# Code coverage reports
+coveragereport/
 EOF
