@@ -10,7 +10,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 // Defaults are production-safe (100 req/min/IP); Development override in
-// appsettings.Development.json keeps a strict 100 req/min for local testing.
+// appsettings.Development.json keeps a strict 20 req/min for local testing.
 var permitLimit = builder.Configuration.GetValue<int>("RateLimiting:PermitLimit", 100);
 var windowInSeconds = builder.Configuration.GetValue<int>("RateLimiting:WindowInSeconds", 60);
 var queueLimit = builder.Configuration.GetValue<int>("RateLimiting:QueueLimit", 0);

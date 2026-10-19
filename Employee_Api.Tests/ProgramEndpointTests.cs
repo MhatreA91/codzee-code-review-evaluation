@@ -94,9 +94,13 @@ public class ProgramIntegrationTests
     [Fact]
     public async Task CreateEmployee_InvalidEmail_Returns400_EndToEnd()
     {
-        // End-to-end 400 for the Create ValidationProblem path: posts a body
-        // that fails [EmailAddress] validation, so the REAL wire status from
-        // the controller's ValidationProblem(ModelState) result is observed.
+        // End-to-end 400 for invalid input. Because EmployeesController is
+        // [ApiController], MVC's automatic model validation rejects the request
+        // with an RFC 7807 ValidationProblemDetails BEFORE the Create action
+        // runs — so this test proves the WIRE contract (400 + errors.email),
+        // not the controller's own code. The controller's explicit
+        // ValidationProblem(ModelState) branch is defense-in-depth and is
+        // covered directly by EmployeesControllerWriteTests.Create_ValidationProblem_WhenInvalid.
         var (factory, client) = CreateSeededClient();
         using (factory)
         using (client)
@@ -112,14 +116,26 @@ public class ProgramIntegrationTests
         {
             Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
             var body = await response.Content.ReadAsStringAsync();
-            Assert.Contains("email", body, StringComparison.OrdinalIgnoreCase);
+            // Assert the framework's ValidationProblemDetails payload (status +
+            // errors.email) rather than a bare substring, so the test pins the
+            // auto-validation 400 contract it actually exercises.
+            using var doc = JsonDocument.Parse(body);
+            Assert.Equal(400, doc.RootElement.GetProperty("status").GetInt32());
+            Assert.True(
+                doc.RootElement.GetProperty("errors").EnumerateObject()
+                    .Any(e => e.Name.Contains("email", StringComparison.OrdinalIgnoreCase)),
+                $"Expected an errors entry for email. Body: {body}");
         }
     }
 
     [Fact]
     public async Task UpdateEmployee_InvalidEmail_Returns400_EndToEnd()
     {
-        // End-to-end 400 for the Update ValidationProblem path.
+        // End-to-end 400 for invalid input on Update. As with Create, the
+        // [ApiController] auto-validation short-circuits before the Update
+        // action runs: this proves the wire 400 + errors.email contract, while
+        // the controller's explicit ValidationProblem(ModelState) branch is
+        // covered by EmployeesControllerWriteTests.Update_Ok_NotFound_Conflict_Invalid.
         var (factory, client) = CreateSeededClient();
         using (factory)
         using (client)
@@ -135,7 +151,12 @@ public class ProgramIntegrationTests
         {
             Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
             var body = await response.Content.ReadAsStringAsync();
-            Assert.Contains("email", body, StringComparison.OrdinalIgnoreCase);
+            using var doc = JsonDocument.Parse(body);
+            Assert.Equal(400, doc.RootElement.GetProperty("status").GetInt32());
+            Assert.True(
+                doc.RootElement.GetProperty("errors").EnumerateObject()
+                    .Any(e => e.Name.Contains("email", StringComparison.OrdinalIgnoreCase)),
+                $"Expected an errors entry for email. Body: {body}");
         }
     }
 

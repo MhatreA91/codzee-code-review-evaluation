@@ -64,6 +64,9 @@ public class EmployeesController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<EmployeeDto>> Create([FromBody] CreateEmployeeDto dto, CancellationToken cancellationToken)
     {
+        // Defense-in-depth: [ApiController] auto-validates ModelState and
+        // returns 400 before the action runs, so this branch is unreachable
+        // over HTTP — covered by EmployeesControllerWriteTests, not the wire tests.
         if (!ModelState.IsValid)
         {
             return ValidationProblem(ModelState);
@@ -89,6 +92,9 @@ public class EmployeesController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<EmployeeDto>> Update(int id, [FromBody] UpdateEmployeeDto dto, CancellationToken cancellationToken)
     {
+        // Defense-in-depth: [ApiController] auto-validates ModelState and
+        // returns 400 before the action runs, so this branch is unreachable
+        // over HTTP — covered by EmployeesControllerWriteTests, not the wire tests.
         if (!ModelState.IsValid)
         {
             return ValidationProblem(ModelState);
