@@ -18,11 +18,24 @@ public class EmployeesController : ControllerBase
         _service = service;
     }
 
-    // GET /api/employees?pageNumber=1&pageSize=10&department=HR
+    // GET /api/employees — legacy contract: returns full bare array.
+    // Kept for backward compatibility; existing clients parse an array
+    // and expect every employee when no query string is supplied.
     [HttpGet]
+    [ProducesResponseType(typeof(IEnumerable<EmployeeDto>), StatusCodes.Status200OK)]
+    public async Task<ActionResult<IEnumerable<EmployeeDto>>> GetAll(CancellationToken cancellationToken)
+    {
+        var employees = await _service.GetAllAsync(cancellationToken);
+        return Ok(employees);
+    }
+
+    // GET /api/employees/paged?pageNumber=1&pageSize=10&department=HR
+    // New opt-in pagination endpoint. Returns a PagedResult envelope;
+    // does NOT change the shape of GET /api/employees above.
+    [HttpGet("paged")]
     [ProducesResponseType(typeof(PagedResult<EmployeeDto>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    public async Task<ActionResult<PagedResult<EmployeeDto>>> GetAll(
+    public async Task<ActionResult<PagedResult<EmployeeDto>>> GetPaged(
         [FromQuery] int pageNumber = 1,
         [FromQuery] int pageSize = 10,
         [FromQuery] string? department = null,
