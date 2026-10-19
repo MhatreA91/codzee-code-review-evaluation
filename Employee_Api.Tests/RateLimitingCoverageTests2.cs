@@ -59,6 +59,31 @@ public class RateLimitingCoverageTests2
         }
     }
 
+    /// <summary>
+    /// PermitLimit=1 factory with an optional null-IP startup filter, so a
+    /// null-IP request and a real-IP request can be proven to live in
+    /// DIFFERENT fixed-window buckets (see the partition test below).
+    /// </summary>
+    private sealed class UnknownBucketLimitFactory : WebApplicationFactory<Program>
+    {
+        private readonly bool _useNullIp;
+        public UnknownBucketLimitFactory(bool useNullIp = true) => _useNullIp = useNullIp;
+        public string DbName { get; } = "RLUNK_" + Guid.NewGuid().ToString("N");
+
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            builder.UseEnvironment("Testing");
+            builder.UseSetting("TESTING_DB_NAME", DbName);
+            builder.UseSetting("RateLimiting:PermitLimit", "1");
+            builder.UseSetting("RateLimiting:WindowInSeconds", "60");
+            builder.UseSetting("RateLimiting:QueueLimit", "0");
+            if (_useNullIp)
+            {
+                builder.ConfigureServices(s => s.AddTransient<IStartupFilter, NullIpStartupFilter>());
+            }
+        }
+    }
+
     private static void EnsureSeeded(IServiceProvider services)
     {
         using var scope = services.CreateScope();
@@ -88,15 +113,28 @@ public class RateLimitingCoverageTests2
     [Fact]
     public async Task NullIp_Partition_Second_Request_Still_Served_Within_PermitLimit()
     {
-        using var factory = new NullIpFactory();
+        // PermitLimit=1 with the null-IP filter: the FIRST null-IP request
+        // consumes the single "unknown"-bucket permit (200), so a SECOND
+        // null-IP request in the same window must be 429. If null-IP
+        // requests each got a fresh bucket (partition key broken), the
+        // second request would wrongly return 200. Two bare 200s on an
+        // unlimited factory could never distinguish these.
+        // (The reverse direction — "unknown" != real-IP bucket — is locked
+        // by RateLimiter_Policy_ReturnsLimiter_ForNullAndNonNullIp.)
+        using var factory = new UnknownBucketLimitFactory();
         EnsureSeeded(factory.Services);
         using var client = factory.CreateClient();
 
         using var first = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
 
-        using var second = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
-        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+        HttpStatusCode? last = null;
+        for (int i = 0; i < 5 && last != HttpStatusCode.TooManyRequests; i++)
+        {
+            using var r = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
+            last = r.StatusCode;
+        }
+        Assert.Equal(HttpStatusCode.TooManyRequests, last);
     }
 
     [Fact]
@@ -163,6 +201,97 @@ public class RateLimitingCoverageTests2
             factory.CreateClient();
         });
         Assert.Contains("ForwardedHeaders:KnownNetworks", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("10.0.0.0/abc")]   // non-numeric prefix: must fail, not become /32
+    [InlineData("10.0.0.0/33")]    // out of range for IPv4 (max 32)
+    [InlineData("10.0.0.0/-1")]    // negative prefix
+    [InlineData("2001:db8::/129")] // out of range for IPv6 (max 128)
+    public void ForwardedHeaders_Malformed_Prefix_Fails_Startup_Loudly(string network)
+    {
+        // Dead-fallback lock: a malformed prefix must fail fast instead of
+        // silently degrading to a single-host (/32//128) network, which
+        // would leave the real proxy untrusted and collapse every client
+        // into one rate-limit bucket with nothing saying why.
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+        {
+            using var factory = new ForwardedHeadersFactory("10.0.0.10", network);
+            factory.CreateClient();
+        });
+        Assert.Contains("ForwardedHeaders:KnownNetworks", ex.Message);
+    }
+
+    private sealed class RateLimitSettingFactory : WebApplicationFactory<Program>
+    {
+        private readonly string _dbName = "RLCFG_" + Guid.NewGuid().ToString("N");
+        private readonly string _key;
+        private readonly string _value;
+
+        public RateLimitSettingFactory(string key, string value)
+        {
+            _key = key;
+            _value = value;
+        }
+
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            builder.UseEnvironment("Testing");
+            builder.UseSetting("TESTING_DB_NAME", _dbName);
+            builder.UseSetting(_key, _value);
+        }
+    }
+
+    [Theory]
+    [InlineData("RateLimiting:PermitLimit", "0")]
+    [InlineData("RateLimiting:PermitLimit", "-5")]
+    [InlineData("RateLimiting:WindowInSeconds", "0")]
+    [InlineData("RateLimiting:WindowInSeconds", "-1")]
+    [InlineData("RateLimiting:QueueLimit", "-1")]
+    public void RateLimiting_NonPositive_Setting_Fails_Startup_Loudly(string key, string value)
+    {
+        // Zero/negative FixedWindow settings would throw ArgumentOutOfRange
+        // deep in the limiter (500 on first request). Fail fast with a
+        // clear message instead.
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+        {
+            using var factory = new RateLimitSettingFactory(key, value);
+            factory.CreateClient();
+        });
+        Assert.Contains(key, ex.Message);
+    }
+
+    [Fact]
+    public async Task OnRejected_Sets_PlainText_ContentType()
+    {
+        // The 429 body is written via WriteAsync: without an explicit
+        // Content-Type, clients may misparse it. Lock text/plain here.
+        using var factory = new LowLimitFactory();
+        EnsureSeeded(factory.Services);
+        using var client = factory.CreateClient();
+
+        using var first = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+
+        HttpResponseMessage? rejected = null;
+        for (int i = 0; i < 10; i++)
+        {
+            var r = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
+            if (r.StatusCode == HttpStatusCode.TooManyRequests)
+            {
+                rejected?.Dispose();
+                rejected = r;
+                break;
+            }
+            r.Dispose();
+        }
+
+        using (rejected)
+        {
+            Assert.NotNull(rejected);
+            Assert.Equal(HttpStatusCode.TooManyRequests, rejected!.StatusCode);
+            Assert.Equal("text/plain; charset=utf-8", rejected.Content.Headers.ContentType?.ToString());
+        }
     }
 
     [Fact]

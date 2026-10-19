@@ -121,10 +121,17 @@ public class ProgramIntegrationTests
     [Fact]
     public async Task Pipeline_Works_Outside_Development()
     {
-        using var factory = new TestApiFactory(environment: "Production");
-        using var client = factory.CreateClient();
-        using var response = await client.GetAsync("/api/employees?pageNumber=1&pageSize=10");
-        response.EnsureSuccessStatusCode();
+        // TestApiFactory already swaps the DbContext to an isolated InMemory
+        // store even for environment:"Production" (see ProgramIntegrationTests.cs),
+        // so seeding here is safe — but keep the relational guard so a future
+        // factory regression can never wipe a real database.
+        var (factory, client) = CreateSeededClient(environment: "Production");
+        using (factory)
+        using (client)
+        using (var response = await client.GetAsync("/api/employees?pageNumber=1&pageSize=10"))
+        {
+            response.EnsureSuccessStatusCode();
+        }
     }
 
     [Fact]

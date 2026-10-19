@@ -15,6 +15,25 @@ var permitLimit = builder.Configuration.GetValue<int>("RateLimiting:PermitLimit"
 var windowInSeconds = builder.Configuration.GetValue<int>("RateLimiting:WindowInSeconds", 60);
 var queueLimit = builder.Configuration.GetValue<int>("RateLimiting:QueueLimit", 0);
 
+// Fail fast: FixedWindowRateLimiterOptions throws ArgumentOutOfRangeException
+// for non-positive PermitLimit/Window (and negative QueueLimit), which would
+// surface as a 500 on first request. Validate here with a clear message.
+if (permitLimit < 1)
+{
+    throw new InvalidOperationException(
+        $"Invalid RateLimiting:PermitLimit '{permitLimit}'. Expected an integer >= 1.");
+}
+if (windowInSeconds < 1)
+{
+    throw new InvalidOperationException(
+        $"Invalid RateLimiting:WindowInSeconds '{windowInSeconds}'. Expected an integer >= 1.");
+}
+if (queueLimit < 0)
+{
+    throw new InvalidOperationException(
+        $"Invalid RateLimiting:QueueLimit '{queueLimit}'. Expected an integer >= 0.");
+}
+
 builder.Services.AddControllers();
 // Swagger generator (Swashbuckle) — single docs source.
 builder.Services.AddEndpointsApiExplorer();
@@ -100,9 +119,19 @@ foreach (var raw in builder.Configuration.GetSection("ForwardedHeaders:KnownNetw
             throw new FormatException($"'{raw}' is not an IP address or CIDR range.");
         }
 
-        var prefix = parts.Length > 1 && int.TryParse(parts[1].Trim(), out var p)
-            ? p
-            : (networkIp.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? 32 : 128);
+        var maxPrefix = networkIp.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? 32 : 128;
+        int prefix;
+        if (parts.Length == 1)
+        {
+            // Bare IP — /32 (IPv4) or /128 (IPv6) single host.
+            prefix = maxPrefix;
+        }
+        else if (!int.TryParse(parts[1].Trim(), out prefix) || prefix < 0 || prefix > maxPrefix)
+        {
+            // Malformed ("10.0.0.0/abc") or out-of-range ("10.0.0.0/33")
+            // prefixes must fail fast, not silently become a single host.
+            throw new FormatException($"'{raw}' has an invalid CIDR prefix. Expected 0-{maxPrefix}.");
+        }
         knownNetworks.Add(new IPNetwork(networkIp, prefix));
 #endif
     }
@@ -159,6 +188,7 @@ builder.Services.AddRateLimiter(options =>
                     .ToString(CultureInfo.InvariantCulture);
         }
 
+        context.HttpContext.Response.ContentType = "text/plain; charset=utf-8";
         await context.HttpContext.Response.WriteAsync(
             "Too many requests. Please try again later.",
             cancellationToken);
@@ -203,9 +233,12 @@ if (app.Urls.Any(u => u.StartsWith("https://", StringComparison.OrdinalIgnoreCas
     app.UseHttpsRedirection();
 }
 
-app.UseAuthorization();
-
+// Rate limiting runs BEFORE authorization so abusive callers burn budget
+// even when they would fail auth. (Per-IP fixed-window policy; see
+// AddRateLimiter above and [EnableRateLimiting] on the controller.)
 app.UseRateLimiter();
+
+app.UseAuthorization();
 
 app.MapControllers();
 

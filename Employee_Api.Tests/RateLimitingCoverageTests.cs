@@ -292,8 +292,14 @@ public class RateLimitingCoverageTests
         EnsureSeeded(factory.Services);
         using var response = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        // Must actually prove the https-URL branch ran: the factory was
+        // configured with UseUrls("https://..."), so the addresses feature
+        // must carry at least one https:// address. A bare NotNull can
+        // never fail even when the branch below is skipped.
         var addresses = factory.Server.Features.Get<IServerAddressesFeature>();
         Assert.NotNull(addresses);
+        Assert.Contains(addresses.Addresses,
+            a => a.StartsWith("https://", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
