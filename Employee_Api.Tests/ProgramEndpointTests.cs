@@ -96,40 +96,52 @@ public class ProgramIntegrationTests
     [Fact]
     public async Task Pipeline_InDevelopment_ServesSwagger()
     {
+        // Development environment covers the app.Environment.IsDevelopment()
+        // branch in Program.cs. TestApiFactory forces an isolated InMemory
+        // EmployeeDbContext, so this never touches the real SQL Server.
         var (factory, client) = CreateSeededClient(environment: "Development");
         using (factory)
         using (client)
         using (var response = await client.GetAsync("/swagger/v1/swagger.json"))
         {
             response.EnsureSuccessStatusCode();
+            var json = await response.Content.ReadAsStringAsync();
+            Assert.Contains("openapi", json, StringComparison.OrdinalIgnoreCase);
         }
     }
 
     [Fact]
     public async Task Pipeline_Works_Outside_Development()
     {
+        // Production environment covers the non-Development path.
+        // TestApiFactory still swaps in InMemory, so no live SQL Server needed.
         using var factory = new TestApiFactory(environment: "Production");
         using var client = factory.CreateClient();
         using var response = await client.GetAsync("/api/employees?pageNumber=1&pageSize=10");
         response.EnsureSuccessStatusCode();
+        // Swagger UI must NOT be served outside Development.
+        using var swagger = await client.GetAsync("/swagger/v1/swagger.json");
+        Assert.Equal(HttpStatusCode.NotFound, swagger.StatusCode);
     }
 
     [Fact]
-    public void Pipeline_Builds_With_Https_Redirection_Configured()
+    public async Task Pipeline_Builds_With_Https_Redirection_Configured()
     {
-        Environment.SetEnvironmentVariable("ASPNETCORE_HTTPS_PORT", "443");
-        try
-        {
-            var (factory, client) = CreateSeededClient();
-            using (factory)
-            using (client)
-            {
-                Assert.NotNull(client);
-            }
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable("ASPNETCORE_HTTPS_PORT", null);
-        }
+        // Pass the HTTPS port through the factory (per-host config) instead of
+        // mutating the process-wide env var, and assert the middleware
+        // actually redirects plain HTTP to HTTPS.
+        using var factory = new TestApiFactory(httpsPort: "443");
+        using var client = factory.CreateClient(
+            new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        using var response = await client.GetAsync("/api/employees?pageNumber=1&pageSize=10");
+        Assert.True(
+            response.StatusCode is HttpStatusCode.TemporaryRedirect
+                or HttpStatusCode.PermanentRedirect
+                or HttpStatusCode.Redirect
+                or HttpStatusCode.MovedPermanently
+                or HttpStatusCode.Found,
+            $"Expected an HTTP->HTTPS redirect, got {response.StatusCode}.");
+        Assert.NotNull(response.Headers.Location);
+        Assert.Equal("https", response.Headers.Location.Scheme);
     }
 }

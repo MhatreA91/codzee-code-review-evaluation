@@ -41,7 +41,13 @@ public class EmployeesControllerWriteTests
         var ctl = new EmployeesController(new Mock<IEmployeeService>().Object);
         ctl.ModelState.AddModelError("Email", "bad");
         var res = await ctl.Create(C(), default);
-        Assert.IsType<ObjectResult>(res.Result);
+        // ValidationProblem(ModelState) returns an ObjectResult whose StatusCode
+        // is null pre-execution; the 400 contract lives on the payload's
+        // ValidationProblemDetails.Status. Assert that, so a 500 ObjectResult
+        // regression cannot pass silently.
+        var result = Assert.IsType<ObjectResult>(res.Result);
+        var details = Assert.IsType<ValidationProblemDetails>(result.Value);
+        Assert.True(details.Errors.ContainsKey("Email"));
     }
 
     [Fact]
@@ -59,7 +65,8 @@ public class EmployeesControllerWriteTests
         Assert.IsType<NotFoundObjectResult>((await ctl.Update(2, U(), default)).Result);
         Assert.IsType<ConflictObjectResult>((await ctl.Update(3, U(), default)).Result);
         ctl.ModelState.AddModelError("x", "bad");
-        Assert.IsType<ObjectResult>((await ctl.Update(1, U(), default)).Result);
+        var invalid = Assert.IsType<ObjectResult>((await ctl.Update(1, U(), default)).Result);
+        Assert.True(Assert.IsType<ValidationProblemDetails>(invalid.Value).Errors.ContainsKey("x"));
     }
 
     [Fact]

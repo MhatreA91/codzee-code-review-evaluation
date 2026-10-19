@@ -79,7 +79,21 @@ public class DbContextModelTests
         var type = typeof(EmployeeDbContext).Assembly.GetType("Employee_Api.Migrations.EmployeeDbContextModelSnapshot")!;
         var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
         var instance = System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(type);
-        type.GetMethod("BuildModel", flags)!.Invoke(instance, new object[] { new ModelBuilder() });
+        var builder = new ModelBuilder();
+        type.GetMethod("BuildModel", flags)!.Invoke(instance, new object[] { builder });
+
+        // Assert on the built model so an empty/wrong snapshot cannot pass silently.
+        // NOTE: invoking BuildModel on an uninitialized snapshot instance
+        // yields a shadow entity (no CLR type), so match by entity name.
+        // Relational annotations (column types) need an initialized model, so
+        // assert structural + annotation state available pre-initialization.
+        var entity = Assert.Single(builder.Model.GetEntityTypes(), e => e.Name == "Employee_Api.Models.Employee");
+        Assert.Equal("EmployeeId", entity.FindPrimaryKey()!.Properties.Single().Name);
+        Assert.Equal("Employees", entity.GetTableName());
+        Assert.Contains(entity.GetIndexes(), i => i.IsUnique && i.Properties.Any(p => p.Name == "Email"));
+        var salary = entity.FindProperty("Salary")!;
+        Assert.Equal("decimal(18,2)", salary.FindAnnotation("Relational:ColumnType")?.Value);
+        Assert.True(entity.GetProperties().Count() >= 7);
     }
 
     [Fact]
