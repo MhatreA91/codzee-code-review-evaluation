@@ -13,21 +13,12 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 // EF Core: SQL Server via connection string in appsettings.json (no hardcoded credentials).
-// The Testing environment swaps in the InMemory provider for WebApplicationFactory integration tests.
-// TESTING_DB_NAME gives each factory a unique isolated database.
-if (builder.Environment.IsEnvironment("Testing"))
-{
-    var testDb = builder.Configuration.GetValue<string>("TESTING_DB_NAME")
-        ?? Environment.GetEnvironmentVariable("TESTING_DB_NAME")
-        ?? "Employee_Api_Testing";
-    builder.Services.AddDbContext<EmployeeDbContext>(options =>
-        options.UseInMemoryDatabase(testDb));
-}
-else
-{
-    builder.Services.AddDbContext<EmployeeDbContext>(options =>
-        options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
-}
+// NOTE: there is intentionally no "Testing"-environment branch here. The app always
+// uses the production provider; integration tests override EmployeeDbContext to an
+// isolated InMemory database inside TestApiFactory (test project only), so a stray
+// ASPNETCORE_ENVIRONMENT=Testing can never silently swap a deployed app to InMemory.
+builder.Services.AddDbContext<EmployeeDbContext>(options =>
+    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
 
 // Repository + Service layer DI
 builder.Services.AddScoped<IEmployeeRepository, EmployeeRepository>();

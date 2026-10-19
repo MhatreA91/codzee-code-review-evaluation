@@ -11,10 +11,13 @@ namespace Employee_Api.Tests;
 /// <summary>
 /// Shared <see cref="WebApplicationFactory{Program}"/> for integration tests.
 /// Lives in its own file so it is discoverable at compile time.
-/// Always swaps <see cref="EmployeeDbContext"/> to an isolated InMemory
-/// database (keyed by <see cref="DbName"/>) regardless of the host
-/// environment, so Development/Production pipeline tests never touch
-/// the real SQL Server connection string or wipe a real database.
+/// This factory owns the test-only InMemory swap: Program.cs always registers
+/// SQL Server, and this factory removes that registration and re-registers an
+/// isolated InMemory <see cref="EmployeeDbContext"/> (keyed by <see cref="DbName"/>),
+/// regardless of host environment — so Development/Production pipeline tests
+/// never touch the real SQL Server connection string or wipe a real database.
+/// The InMemory package is referenced by the test project only and no longer
+/// ships in the production binary.
 /// </summary>
 public sealed class TestApiFactory : WebApplicationFactory<Program>
 {
@@ -53,12 +56,10 @@ public sealed class TestApiFactory : WebApplicationFactory<Program>
                 o => o.HttpsPort = int.Parse(_httpsPort)));
         }
 
-        // Force InMemory even when Program.cs would pick SQL Server
-        // (any environment other than "Testing"). This keeps CI hermetic
-        // and prevents EnsureDeleted/EnsureCreated from touching SQL Server.
-        // Remove every EF Core registration (options + context + provider
-        // singletons such as the SqlServer internal provider); removing only
-        // DbContextOptions leaves the SqlServer provider cached and EF throws
+        // TestApiFactory owns the InMemory swap (Program.cs always registers
+        // SQL Server). Remove every EF Core registration (options + context +
+        // provider singletons such as the SqlServer internal provider); removing
+        // only DbContextOptions leaves the SqlServer provider cached and EF throws
         // "multiple database providers".
         builder.ConfigureServices(services =>
         {
