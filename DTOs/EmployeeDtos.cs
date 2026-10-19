@@ -17,6 +17,19 @@ public class EmployeeDto
 }
 
 /// <summary>
+/// Generic paged response envelope for list endpoints.
+/// Serialized as camelCase JSON: items, totalCount, pageNumber, pageSize, totalPages.
+/// </summary>
+public class PagedResult<T>
+{
+    public List<T> Items { get; set; } = new();
+    public int TotalCount { get; set; }
+    public int PageNumber { get; set; }
+    public int PageSize { get; set; }
+    public int TotalPages { get; set; }
+}
+
+/// <summary>
 /// DTO for POST /api/employees
 /// </summary>
 public class CreateEmployeeDto

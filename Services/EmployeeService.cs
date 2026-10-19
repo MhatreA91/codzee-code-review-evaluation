@@ -23,6 +23,23 @@ public class EmployeeService : IEmployeeService
         return employees.Select(EmployeeMapper.ToDto).ToList();
     }
 
+    public async Task<PagedResult<EmployeeDto>> GetPagedAsync(string? department, int pageNumber, int pageSize, CancellationToken cancellationToken = default)
+    {
+        var normalizedDepartment = string.IsNullOrWhiteSpace(department) ? null : department.Trim();
+        var (entities, totalCount) = await _repository.GetPagedAsync(normalizedDepartment, pageNumber, pageSize, cancellationToken);
+        var dtos = entities.Select(EmployeeMapper.ToDto).ToList();
+        var totalPages = (int)Math.Ceiling(totalCount / (double)pageSize);
+
+        return new PagedResult<EmployeeDto>
+        {
+            Items = dtos,
+            TotalCount = totalCount,
+            PageNumber = pageNumber,
+            PageSize = pageSize,
+            TotalPages = totalPages
+        };
+    }
+
     public async Task<EmployeeDto?> GetByIdAsync(int id, CancellationToken cancellationToken = default)
     {
         var employee = await _repository.GetByIdAsync(id, cancellationToken);
