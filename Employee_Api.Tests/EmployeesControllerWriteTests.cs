@@ -1,7 +1,11 @@
 using Employee_Api.Controllers;
 using Employee_Api.DTOs;
 using Employee_Api.Services;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Infrastructure;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
+using System.Reflection;
 using Moq;
 
 namespace Employee_Api.Tests;
@@ -25,6 +29,26 @@ public class EmployeesControllerWriteTests
         DateOfJoining = new DateTime(2022, 1, 1)
     };
 
+    /// <summary>
+    /// The 400 contract for ValidationProblem results: pre-execution both
+    /// <see cref="ObjectResult.StatusCode"/> and
+    /// <see cref="ValidationProblemDetails.Status"/> are null (the status is
+    /// materialized by the MVC pipeline at execution time), so the strongest
+    /// unit-level 400 assertion is the declared contract — the
+    /// <c>[DefaultStatusCode(400)]</c> attribute on the ValidationProblem
+    /// overload the controller called — plus the error payload.
+    /// </summary>
+    private static void AssertValidationProblem400(MethodBase? caller, ObjectResult result, string errorKey)
+    {
+        var details = Assert.IsType<ValidationProblemDetails>(result.Value);
+        Assert.True(details.Errors.ContainsKey(errorKey));
+        Assert.NotNull(caller);
+        var attr = caller!.GetCustomAttributes(typeof(DefaultStatusCodeAttribute), inherit: false)
+            .Cast<DefaultStatusCodeAttribute>()
+            .SingleOrDefault(a => a.StatusCode == StatusCodes.Status400BadRequest);
+        Assert.NotNull(attr);
+    }
+
     [Fact]
     public async Task Create_Conflict_OnDuplicate()
     {
@@ -41,13 +65,13 @@ public class EmployeesControllerWriteTests
         var ctl = new EmployeesController(new Mock<IEmployeeService>().Object);
         ctl.ModelState.AddModelError("Email", "bad");
         var res = await ctl.Create(C(), default);
-        // ValidationProblem(ModelState) returns an ObjectResult whose StatusCode
-        // is null pre-execution; the 400 contract lives on the payload's
-        // ValidationProblemDetails.Status. Assert that, so a 500 ObjectResult
-        // regression cannot pass silently.
+        // 400 contract: payload carries the error key AND the result honors
+        // the framework's DefaultStatusCode(400) declaration — a 500
+        // ObjectResult regression cannot pass silently.
         var result = Assert.IsType<ObjectResult>(res.Result);
-        var details = Assert.IsType<ValidationProblemDetails>(result.Value);
-        Assert.True(details.Errors.ContainsKey("Email"));
+        AssertValidationProblem400(typeof(ControllerBase).GetMethod(
+            nameof(ControllerBase.ValidationProblem),
+            [typeof(ModelStateDictionary)])!, result, "Email");
     }
 
     [Fact]
@@ -66,7 +90,9 @@ public class EmployeesControllerWriteTests
         Assert.IsType<ConflictObjectResult>((await ctl.Update(3, U(), default)).Result);
         ctl.ModelState.AddModelError("x", "bad");
         var invalid = Assert.IsType<ObjectResult>((await ctl.Update(1, U(), default)).Result);
-        Assert.True(Assert.IsType<ValidationProblemDetails>(invalid.Value).Errors.ContainsKey("x"));
+        AssertValidationProblem400(typeof(ControllerBase).GetMethod(
+            nameof(ControllerBase.ValidationProblem),
+            [typeof(ModelStateDictionary)])!, invalid, "x");
     }
 
     [Fact]
