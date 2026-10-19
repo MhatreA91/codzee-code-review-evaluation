@@ -173,7 +173,10 @@ public class RateLimitingCoverageTests2
         using var factory = new NullIpFactory();
         var options = factory.Services.GetRequiredService<IOptions<ForwardedHeadersOptions>>().Value;
         Assert.True(options.ForwardedHeaders.HasFlag(ForwardedHeaders.XForwardedFor));
-        Assert.True(options.ForwardedHeaders.HasFlag(ForwardedHeaders.XForwardedProto));
+        // X-Forwarded-Proto is intentionally OFF: enabling it would rewrite
+        // Request.Scheme globally and change HTTPS-redirection behaviour —
+        // outside the rate-limiting scope. Only the client IP is needed.
+        Assert.False(options.ForwardedHeaders.HasFlag(ForwardedHeaders.XForwardedProto));
     }
 
     private sealed class ForwardedHeadersFactory : WebApplicationFactory<Program>
@@ -431,9 +434,11 @@ public class RateLimitingCoverageTests2
         // async + await: keeps the HttpRequestMessage alive until SendAsync
         // finishes. Returning the bare task from a `using var request` method
         // would dispose the request while the send is still in flight (race).
+        // NOTE: only X-Forwarded-For is sent — X-Forwarded-Proto is
+        // intentionally disabled app-wide (rate-limiting scope only), so the
+        // helper must not depend on it.
         using var request = new HttpRequestMessage(HttpMethod.Get, "/api/employees?pageNumber=1&pageSize=1");
         request.Headers.TryAddWithoutValidation("X-Forwarded-For", ip);
-        request.Headers.TryAddWithoutValidation("X-Forwarded-Proto", "https");
         return await client.SendAsync(request);
     }
 }

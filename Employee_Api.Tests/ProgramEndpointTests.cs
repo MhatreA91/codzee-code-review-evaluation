@@ -31,6 +31,7 @@ public class ProgramIntegrationTests
         {
             using var scope = factory.Services.CreateScope();
             var context = scope.ServiceProvider.GetRequiredService<EmployeeDbContext>();
+            GuardAgainstRelationalProvider(context, nameof(CreateSeededClient));
             // Fresh Guid-named InMemory store per factory, so no reset is needed:
             // EnsureCreated materializes the store, then seed unconditionally.
             context.Database.EnsureCreated();
@@ -87,6 +88,54 @@ public class ProgramIntegrationTests
         using (var response = await client.GetAsync("/api/employees?pageNumber=0&pageSize=10"))
         {
             Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task CreateEmployee_InvalidEmail_Returns400_EndToEnd()
+    {
+        // End-to-end 400 for the Create ValidationProblem path: posts a body
+        // that fails [EmailAddress] validation, so the REAL wire status from
+        // the controller's ValidationProblem(ModelState) result is observed.
+        var (factory, client) = CreateSeededClient();
+        using (factory)
+        using (client)
+        using (var response = await client.PostAsJsonAsync("/api/employees", new
+        {
+            firstName = "Bad",
+            lastName = "Email",
+            email = "not-an-email",
+            department = "HR",
+            salary = 1,
+            dateOfJoining = new DateTime(2022, 1, 1)
+        }))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.Contains("email", body, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
+    public async Task UpdateEmployee_InvalidEmail_Returns400_EndToEnd()
+    {
+        // End-to-end 400 for the Update ValidationProblem path.
+        var (factory, client) = CreateSeededClient();
+        using (factory)
+        using (client)
+        using (var response = await client.PutAsJsonAsync("/api/employees/1", new
+        {
+            firstName = "Asha",
+            lastName = "K",
+            email = "not-an-email",
+            department = "HR",
+            salary = 60000,
+            dateOfJoining = new DateTime(2022, 1, 1)
+        }))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.Contains("email", body, StringComparison.OrdinalIgnoreCase);
         }
     }
 

@@ -10,7 +10,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 // Defaults are production-safe (100 req/min/IP); Development override in
-// appsettings.Development.json keeps a strict 2 req/min for local testing.
+// appsettings.Development.json keeps a strict 100 req/min for local testing.
 var permitLimit = builder.Configuration.GetValue<int>("RateLimiting:PermitLimit", 100);
 var windowInSeconds = builder.Configuration.GetValue<int>("RateLimiting:WindowInSeconds", 60);
 var queueLimit = builder.Configuration.GetValue<int>("RateLimiting:QueueLimit", 0);
@@ -134,19 +134,23 @@ foreach (var raw in builder.Configuration.GetSection("ForwardedHeaders:KnownNetw
     }
 }
 
-// Trust X-Forwarded-For / X-Forwarded-Proto ONLY from known proxies /
+// Trust X-Forwarded-For ONLY from known proxies /
 // networks so Connection.RemoteIpAddress reflects the real client IP.
 // This keeps the per-IP rate-limit partition from collapsing all clients
 // behind a proxy into a single bucket. The ASP.NET Core default trusts
 // loopback proxies only — we KEEP that default and only ADD the validated
 // proxies above. Never Clear() KnownProxies/KnownIPNetworks: clearing would
-// trust X-Forwarded-* from any direct caller, letting a client rotate
-// X-Forwarded-For to get a fresh rate-limit bucket per request (bypassing
-// the limit) and spoof X-Forwarded-Proto:https to skip HTTPS redirection.
+// trust X-Forwarded-For from any direct caller, letting a client rotate
+// the header to get a fresh rate-limit bucket per request (bypassing
+// the limit).
+// NOTE: X-Forwarded-Proto is deliberately NOT enabled. It would rewrite
+// Request.Scheme globally and change HTTPS-redirection behaviour for the
+// whole app — outside this rate-limiting change's scope. Only the client
+// IP is needed for per-IP partitioning.
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
     options.ForwardedHeaders =
-        ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+        ForwardedHeaders.XForwardedFor;
 
     foreach (var proxyIp in knownProxies)
     {
@@ -201,7 +205,7 @@ builder.Services.AddRateLimiter(options =>
 
 var app = builder.Build();
 
-// Must run first: rewrites RemoteIpAddress/Scheme from X-Forwarded-*
+// Must run first: rewrites RemoteIpAddress from X-Forwarded-For
 // before auth, rate limiting, and routing see the request. Otherwise the
 // rate-limit partition still sees the proxy IP.
 app.UseForwardedHeaders();
