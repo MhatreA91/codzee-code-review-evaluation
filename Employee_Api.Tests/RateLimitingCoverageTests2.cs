@@ -22,11 +22,29 @@ public class RateLimitingCoverageTests2
 {
     private sealed class NullIpStartupFilter : IStartupFilter
     {
+        // Keep in sync with the filter in RateLimitingCoverageTests.cs:
+        // TestServer leaves RemoteIpAddress NULL by default, so assign a
+        // fixed real IP (127.0.0.2) to ordinary requests and null it ONLY
+        // for the X-Null-Remote-Ip marker. Otherwise every request shares
+        // the "unknown" bucket and partition tests prove nothing.
+        public const string MarkerHeader = "X-Null-Remote-Ip";
+
+        public static readonly System.Net.IPAddress FixedTestIp =
+            System.Net.IPAddress.Parse("127.0.0.2");
+
         public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) => app =>
         {
             app.Use(async (ctx, nxt) =>
             {
-                ctx.Connection.RemoteIpAddress = null;
+                if (ctx.Request.Headers.ContainsKey(MarkerHeader))
+                {
+                    ctx.Request.Headers.Remove(MarkerHeader);
+                    ctx.Connection.RemoteIpAddress = null;
+                }
+                else
+                {
+                    ctx.Connection.RemoteIpAddress = FixedTestIp;
+                }
                 await nxt();
             });
             next(app);
@@ -106,31 +124,41 @@ public class RateLimitingCoverageTests2
         EnsureSeeded(factory.Services);
         using var client = factory.CreateClient();
 
-        using var response = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
+        // Marker header selects null-IP per-request (see filter above);
+        // proves the ?? "unknown" branch serves a real request end-to-end.
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/employees?pageNumber=1&pageSize=1");
+        request.Headers.TryAddWithoutValidation(NullIpStartupFilter.MarkerHeader, "1");
+        using var response = await client.SendAsync(request);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
     [Fact]
     public async Task NullIp_Partition_Second_Request_Still_Served_Within_PermitLimit()
     {
-        // PermitLimit=1 with the null-IP filter: the FIRST null-IP request
+        // PermitLimit=1 with the null-IP marker: the FIRST null-IP request
         // consumes the single "unknown"-bucket permit (200), so the SECOND
         // null-IP request in the same window must be 429 — asserted
         // immediately, with no retry loop. A loop-until-429 would also pass
         // if the bucket wrongly held 2+ permits, hiding the regression.
         // If null-IP requests each got a fresh bucket (partition key broken),
         // the second request would wrongly return 200.
-        // (The reverse direction — "unknown" != real-IP bucket — is locked
-        // by RateLimiter_Policy_ReturnsLimiter_ForNullAndNonNullIp.)
         using var factory = new UnknownBucketLimitFactory();
         EnsureSeeded(factory.Services);
         using var client = factory.CreateClient();
 
-        using var first = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
+        using var first = await SendNullIpAsync(client);
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
 
-        using var second = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
+        using var second = await SendNullIpAsync(client);
         Assert.Equal(HttpStatusCode.TooManyRequests, second.StatusCode);
+    }
+
+    private static Task<HttpResponseMessage> SendNullIpAsync(HttpClient client)
+    {
+        // Marker header selects null-IP per-request (see filter above).
+        var request = new HttpRequestMessage(HttpMethod.Get, "/api/employees?pageNumber=1&pageSize=1");
+        request.Headers.TryAddWithoutValidation(NullIpStartupFilter.MarkerHeader, "1");
+        return client.SendAsync(request);
     }
 
     [Fact]
