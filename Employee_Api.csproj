@@ -14,8 +14,6 @@
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.3" />
-    <!-- Test-only provider: used solely by the Testing-environment branch in Program.cs. -->
-    <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="10.0.3" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="10.3.0" />
   </ItemGroup>
 

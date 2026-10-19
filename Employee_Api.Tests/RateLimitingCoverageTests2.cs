@@ -58,8 +58,11 @@ public class RateLimitingCoverageTests2
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
-            builder.UseSetting("TESTING_DB_NAME", DbName);
-            builder.ConfigureServices(s => s.AddTransient<IStartupFilter, NullIpStartupFilter>());
+            builder.ConfigureServices(s =>
+            {
+                TestDbSwap.ReplaceWithInMemory(s, DbName);
+                s.AddTransient<IStartupFilter, NullIpStartupFilter>();
+            });
         }
     }
 
@@ -70,7 +73,7 @@ public class RateLimitingCoverageTests2
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
-            builder.UseSetting("TESTING_DB_NAME", DbName);
+            builder.ConfigureServices(s => TestDbSwap.ReplaceWithInMemory(s, DbName));
             builder.UseSetting("RateLimiting:PermitLimit", "1");
             builder.UseSetting("RateLimiting:WindowInSeconds", "60");
             builder.UseSetting("RateLimiting:QueueLimit", "0");
@@ -91,14 +94,17 @@ public class RateLimitingCoverageTests2
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
-            builder.UseSetting("TESTING_DB_NAME", DbName);
+            builder.ConfigureServices(s =>
+            {
+                TestDbSwap.ReplaceWithInMemory(s, DbName);
+                if (_useNullIp)
+                {
+                    s.AddTransient<IStartupFilter, NullIpStartupFilter>();
+                }
+            });
             builder.UseSetting("RateLimiting:PermitLimit", "1");
             builder.UseSetting("RateLimiting:WindowInSeconds", "60");
             builder.UseSetting("RateLimiting:QueueLimit", "0");
-            if (_useNullIp)
-            {
-                builder.ConfigureServices(s => s.AddTransient<IStartupFilter, NullIpStartupFilter>());
-            }
         }
     }
 

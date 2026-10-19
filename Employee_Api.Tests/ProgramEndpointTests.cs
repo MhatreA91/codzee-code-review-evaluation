@@ -31,18 +31,15 @@ public class ProgramIntegrationTests
         {
             using var scope = factory.Services.CreateScope();
             var context = scope.ServiceProvider.GetRequiredService<EmployeeDbContext>();
-            GuardAgainstRelationalProvider(context, nameof(CreateSeededClient));
-            context.Database.EnsureDeleted();
+            // Fresh Guid-named InMemory store per factory, so no reset is needed:
+            // EnsureCreated materializes the store, then seed unconditionally.
             context.Database.EnsureCreated();
-            if (!context.Employees.Any())
-            {
-                context.Employees.AddRange(
-                    new Employee_Api.Models.Employee { FirstName = "Asha", LastName = "K", Email = "asha.k@example.com", Department = "HR", Salary = 60000, DateOfJoining = new DateTime(2022, 1, 1) },
-                    new Employee_Api.Models.Employee { FirstName = "Dev", LastName = "P", Email = "dev.p@example.com", Department = "Engineering", Salary = 60000, DateOfJoining = new DateTime(2022, 1, 1) },
-                    new Employee_Api.Models.Employee { FirstName = "Mira", LastName = "S", Email = "mira.s@example.com", Department = "HR", Salary = 60000, DateOfJoining = new DateTime(2022, 1, 1) },
-                    new Employee_Api.Models.Employee { FirstName = "Om", LastName = "T", Email = "om.t@example.com", Department = "Finance", Salary = 60000, DateOfJoining = new DateTime(2022, 1, 1) });
-                context.SaveChanges();
-            }
+            context.Employees.AddRange(
+                new Employee_Api.Models.Employee { FirstName = "Asha", LastName = "K", Email = "asha.k@example.com", Department = "HR", Salary = 60000, DateOfJoining = new DateTime(2022, 1, 1) },
+                new Employee_Api.Models.Employee { FirstName = "Dev", LastName = "P", Email = "dev.p@example.com", Department = "Engineering", Salary = 60000, DateOfJoining = new DateTime(2022, 1, 1) },
+                new Employee_Api.Models.Employee { FirstName = "Mira", LastName = "S", Email = "mira.s@example.com", Department = "HR", Salary = 60000, DateOfJoining = new DateTime(2022, 1, 1) },
+                new Employee_Api.Models.Employee { FirstName = "Om", LastName = "T", Email = "om.t@example.com", Department = "Finance", Salary = 60000, DateOfJoining = new DateTime(2022, 1, 1) });
+            context.SaveChanges();
 
             return (factory, client);
         }
@@ -109,47 +106,52 @@ public class ProgramIntegrationTests
     [Fact]
     public async Task Pipeline_InDevelopment_ServesSwagger()
     {
+        // Development environment covers the app.Environment.IsDevelopment()
+        // branch in Program.cs. TestApiFactory forces an isolated InMemory
+        // EmployeeDbContext, so this never touches the real SQL Server.
         var (factory, client) = CreateSeededClient(environment: "Development");
         using (factory)
         using (client)
         using (var response = await client.GetAsync("/swagger/v1/swagger.json"))
         {
             response.EnsureSuccessStatusCode();
+            var json = await response.Content.ReadAsStringAsync();
+            Assert.Contains("openapi", json, StringComparison.OrdinalIgnoreCase);
         }
     }
 
     [Fact]
     public async Task Pipeline_Works_Outside_Development()
     {
-        // TestApiFactory already swaps the DbContext to an isolated InMemory
-        // store even for environment:"Production" (see ProgramIntegrationTests.cs),
-        // so seeding here is safe — but keep the relational guard so a future
-        // factory regression can never wipe a real database.
-        var (factory, client) = CreateSeededClient(environment: "Production");
-        using (factory)
-        using (client)
-        using (var response = await client.GetAsync("/api/employees?pageNumber=1&pageSize=10"))
-        {
-            response.EnsureSuccessStatusCode();
-        }
+        // Production environment covers the non-Development path.
+        // TestApiFactory still swaps in InMemory, so no live SQL Server needed.
+        using var factory = new TestApiFactory(environment: "Production");
+        using var client = factory.CreateClient();
+        using var response = await client.GetAsync("/api/employees?pageNumber=1&pageSize=10");
+        response.EnsureSuccessStatusCode();
+        // Swagger UI must NOT be served outside Development.
+        using var swagger = await client.GetAsync("/swagger/v1/swagger.json");
+        Assert.Equal(HttpStatusCode.NotFound, swagger.StatusCode);
     }
 
     [Fact]
-    public void Pipeline_Builds_With_Https_Redirection_Configured()
+    public async Task Pipeline_Builds_With_Https_Redirection_Configured()
     {
-        Environment.SetEnvironmentVariable("ASPNETCORE_HTTPS_PORT", "443");
-        try
-        {
-            var (factory, client) = CreateSeededClient();
-            using (factory)
-            using (client)
-            {
-                Assert.NotNull(client);
-            }
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable("ASPNETCORE_HTTPS_PORT", null);
-        }
+        // Pass the HTTPS port through the factory (per-host config) instead of
+        // mutating the process-wide env var, and assert the middleware
+        // actually redirects plain HTTP to HTTPS.
+        using var factory = new TestApiFactory(httpsPort: "443");
+        using var client = factory.CreateClient(
+            new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        using var response = await client.GetAsync("/api/employees?pageNumber=1&pageSize=10");
+        Assert.True(
+            response.StatusCode is HttpStatusCode.TemporaryRedirect
+                or HttpStatusCode.PermanentRedirect
+                or HttpStatusCode.Redirect
+                or HttpStatusCode.MovedPermanently
+                or HttpStatusCode.Found,
+            $"Expected an HTTP->HTTPS redirect, got {response.StatusCode}.");
+        Assert.NotNull(response.Headers.Location);
+        Assert.Equal("https", response.Headers.Location.Scheme);
     }
 }

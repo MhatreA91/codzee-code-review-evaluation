@@ -1,13 +1,13 @@
 using System.Net;
 using Employee_Api.Controllers;
 using Employee_Api.Data;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using System.Threading.RateLimiting;
@@ -15,28 +15,13 @@ using System.Threading.RateLimiting;
 namespace Employee_Api.Tests;
 
 /// <summary>
-/// Serial collection for tests that mutate the process-wide TESTING_DB_NAME
-/// environment variable. Even though the assembly disables test
-/// parallelization globally (see AssemblyInfo.cs), scoping these to their own
-/// non-parallel collection keeps them from racing each other (or future
-/// parallel runners) on shared process state.
-/// </summary>
-[CollectionDefinition("EnvVarSerial", DisableParallelization = true)]
-public sealed class EnvVarSerialCollection { }
-
-/// <summary>
 /// Covers the rate-limiting branches added in Program.cs (+ locks the
 /// controller policy). Targets OnRejected with/without RetryAfter metadata,
-/// the null-IP ("unknown") partition, 429 end-to-end, TESTING_DB_NAME
-/// fallbacks and the https-Urls branch.
+/// the null-IP ("unknown") partition, 429 end-to-end, factory InMemory
+/// isolation and the https-Urls branch.
 /// </summary>
-[Collection("EnvVarSerial")]
 public class RateLimitingCoverageTests
 {
-    // Extra guard on top of the [Collection("EnvVarSerial")]: serializes the
-    // process-wide TESTING_DB_NAME mutations even if a future runner ignores
-    // collection scoping. SemaphoreSlim (not lock) because the tests await.
-    private static readonly SemaphoreSlim EnvVarGate = new(1, 1);
 
     private sealed class TestLease : RateLimitLease
     {
@@ -95,11 +80,14 @@ public class RateLimitingCoverageTests
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
-            builder.UseSetting("TESTING_DB_NAME", DbName);
+            builder.ConfigureServices(s =>
+            {
+                TestDbSwap.ReplaceWithInMemory(s, DbName);
+                s.AddTransient<IStartupFilter, NullIpStartupFilter>();
+            });
             builder.UseSetting("RateLimiting:PermitLimit", "1");
             builder.UseSetting("RateLimiting:WindowInSeconds", "60");
             builder.UseSetting("RateLimiting:QueueLimit", "0");
-            builder.ConfigureServices(s => s.AddTransient<IStartupFilter, NullIpStartupFilter>());
         }
     }
 
@@ -109,16 +97,21 @@ public class RateLimitingCoverageTests
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
-            builder.UseSetting("TESTING_DB_NAME", DbName);
-            builder.ConfigureServices(s => s.AddTransient<IStartupFilter, NullIpStartupFilter>());
+            builder.ConfigureServices(s =>
+            {
+                TestDbSwap.ReplaceWithInMemory(s, DbName);
+                s.AddTransient<IStartupFilter, NullIpStartupFilter>();
+            });
         }
     }
 
     private sealed class NoDbSettingFactory : WebApplicationFactory<Program>
     {
+        public string DbName { get; } = "RLNODEFAULT_" + Guid.NewGuid().ToString("N");
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
+            builder.ConfigureServices(s => TestDbSwap.ReplaceWithInMemory(s, DbName));
         }
     }
 
@@ -128,7 +121,7 @@ public class RateLimitingCoverageTests
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
-            builder.UseSetting("TESTING_DB_NAME", DbName);
+            builder.ConfigureServices(s => TestDbSwap.ReplaceWithInMemory(s, DbName));
             builder.UseUrls("https://localhost:5001");
         }
     }
@@ -261,58 +254,33 @@ public class RateLimitingCoverageTests
     [Fact]
     public async Task TestingDbName_FallsBack_To_EnvironmentVariable_WhenConfigMissing()
     {
-        await EnvVarGate.WaitAsync();
-        try
-        {
-            var envDb = "ENVDB_" + Guid.NewGuid().ToString("N");
-            Environment.SetEnvironmentVariable("TESTING_DB_NAME", envDb);
-            try
-            {
-                using var factory = new NoDbSettingFactory();
-                using var client = factory.CreateClient();
-                // Marker row: proves the pipeline's DbContext actually uses
-                // the env-var database. If Program.cs ignored the env var
-                // (e.g. always used "Employee_Api_Testing"), the raw lookup
-                // below would find nothing and this test would fail — a bare
-                // 200 assertion could never catch that.
-                SeedMarker(factory.Services, "env-marker@example.com");
-                using var response = await client.GetAsync("/api/employees?pageNumber=1&pageSize=10");
-                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-                Assert.True(StoreContains(factory.Services, "env-marker@example.com"),
-                    "Marker row missing: DbContext is not using the TESTING_DB_NAME env-var database.");
-            }
-            finally
-            {
-                Environment.SetEnvironmentVariable("TESTING_DB_NAME", null);
-            }
-        }
-        finally
-        {
-            EnvVarGate.Release();
-        }
+        // Program.cs no longer reads TESTING_DB_NAME at all: the InMemory swap
+        // is owned by each test factory via TestDbSwap (with an explicit
+        // per-factory DbName). The old env-var contract is therefore obsolete.
+        // This test now locks the replacement contract: the factory's DbContext
+        // is InMemory-backed and serves the marker row seeded through it.
+        using var factory = new NoDbSettingFactory();
+        using var client = factory.CreateClient();
+        SeedMarker(factory.Services, "env-marker@example.com");
+        using var response = await client.GetAsync("/api/employees?pageNumber=1&pageSize=10");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(StoreContains(factory.Services, "env-marker@example.com"),
+            "Marker row missing: DbContext is not using the factory's InMemory database.");
     }
 
     [Fact]
     public async Task TestingDbName_FallsBack_To_Default_WhenConfigAndEnvMissing()
     {
-        await EnvVarGate.WaitAsync();
-        try
-        {
-            Environment.SetEnvironmentVariable("TESTING_DB_NAME", null);
-            using var factory = new NoDbSettingFactory();
-            using var client = factory.CreateClient();
-            // Same marker technique: proves the default-name store is the
-            // one actually serving requests, not just that a 200 came back.
-            SeedMarker(factory.Services, "default-marker@example.com");
-            using var response = await client.GetAsync("/api/employees?pageNumber=1&pageSize=10");
-            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-            Assert.True(StoreContains(factory.Services, "default-marker@example.com"),
-                "Marker row missing: DbContext is not using the default testing database.");
-        }
-        finally
-        {
-            EnvVarGate.Release();
-        }
+        // Same as above: no env-var/default-name fallback exists in the app
+        // anymore. Lock that the factory still serves its own isolated
+        // InMemory store.
+        using var factory = new NoDbSettingFactory();
+        using var client = factory.CreateClient();
+        SeedMarker(factory.Services, "default-marker@example.com");
+        using var response = await client.GetAsync("/api/employees?pageNumber=1&pageSize=10");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(StoreContains(factory.Services, "default-marker@example.com"),
+            "Marker row missing: DbContext is not using the factory's InMemory database.");
     }
 
     private static void SeedMarker(IServiceProvider services, string email)
