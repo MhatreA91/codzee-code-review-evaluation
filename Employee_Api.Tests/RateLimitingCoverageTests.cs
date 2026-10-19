@@ -183,13 +183,11 @@ public class RateLimitingCoverageTests
         using var realFirst = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
         Assert.Equal(HttpStatusCode.OK, realFirst.StatusCode);
 
-        HttpStatusCode? last = null;
-        for (int i = 0; i < 5 && last != HttpStatusCode.TooManyRequests; i++)
-        {
-            using var r = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
-            last = r.StatusCode;
-        }
-        Assert.Equal(HttpStatusCode.TooManyRequests, last);
+        // Strict: the very next request on the same IP must be 429 — no
+        // retry loop. A loop-until-429 would also pass if the bucket wrongly
+        // held 2+ permits, hiding the regression.
+        using var realSecond = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
+        Assert.Equal(HttpStatusCode.TooManyRequests, realSecond.StatusCode);
 
         using var nullFactory = new NullIpFactory();
         EnsureSeeded(nullFactory.Services);
@@ -208,26 +206,15 @@ public class RateLimitingCoverageTests
         using var first = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
 
-        HttpStatusCode? last = null;
-        string body = "";
-        HttpResponseMessage? rejected = null;
-        for (int i = 0; i < 10; i++)
-        {
-            var r = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
-            last = r.StatusCode;
-            body = await r.Content.ReadAsStringAsync();
-            if (last == HttpStatusCode.TooManyRequests)
-            {
-                rejected?.Dispose();
-                rejected = r;
-                break;
-            }
-            r.Dispose();
-        }
+        // Strict: the very next request must be the 429 — no retry loop, so
+        // the body/Retry-After assertions below provably target the 2nd
+        // request, not the Nth.
+        HttpResponseMessage? rejected = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
+        string body = await rejected.Content.ReadAsStringAsync();
 
         using (rejected)
         {
-            Assert.Equal(HttpStatusCode.TooManyRequests, last);
+            Assert.Equal(HttpStatusCode.TooManyRequests, rejected.StatusCode);
             Assert.Contains("Too many requests", body);
             // The PR claims Retry-After is sent: lock it on the real 429.
             Assert.NotNull(rejected);
@@ -250,9 +237,16 @@ public class RateLimitingCoverageTests
             {
                 using var factory = new NoDbSettingFactory();
                 using var client = factory.CreateClient();
-                EnsureSeeded(factory.Services);
-                using var response = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
+                // Marker row: proves the pipeline's DbContext actually uses
+                // the env-var database. If Program.cs ignored the env var
+                // (e.g. always used "Employee_Api_Testing"), the raw lookup
+                // below would find nothing and this test would fail — a bare
+                // 200 assertion could never catch that.
+                SeedMarker(factory.Services, "env-marker@example.com");
+                using var response = await client.GetAsync("/api/employees?pageNumber=1&pageSize=10");
                 Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+                Assert.True(StoreContains(factory.Services, "env-marker@example.com"),
+                    "Marker row missing: DbContext is not using the TESTING_DB_NAME env-var database.");
             }
             finally
             {
@@ -274,13 +268,57 @@ public class RateLimitingCoverageTests
             Environment.SetEnvironmentVariable("TESTING_DB_NAME", null);
             using var factory = new NoDbSettingFactory();
             using var client = factory.CreateClient();
-            EnsureSeeded(factory.Services);
-            using var response = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
+            // Same marker technique: proves the default-name store is the
+            // one actually serving requests, not just that a 200 came back.
+            SeedMarker(factory.Services, "default-marker@example.com");
+            using var response = await client.GetAsync("/api/employees?pageNumber=1&pageSize=10");
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.True(StoreContains(factory.Services, "default-marker@example.com"),
+                "Marker row missing: DbContext is not using the default testing database.");
         }
         finally
         {
             EnvVarGate.Release();
+        }
+    }
+
+    private static void SeedMarker(IServiceProvider services, string email)
+    {
+        using var scope = services.CreateScope();
+        var ctx = scope.ServiceProvider.GetRequiredService<EmployeeDbContext>();
+        GuardInMemory(ctx, nameof(SeedMarker));
+        ctx.Database.EnsureCreated();
+        ctx.Employees.Add(new Employee_Api.Models.Employee
+        {
+            FirstName = "Marker",
+            LastName = "Row",
+            Email = email,
+            Department = "QA",
+            Salary = 1,
+            DateOfJoining = new DateTime(2024, 1, 1)
+        });
+        ctx.SaveChanges();
+    }
+
+    private static bool StoreContains(IServiceProvider services, string email)
+    {
+        // Fresh scope + raw (untracked, DB-backed) lookup: proves the marker
+        // row is IN THE STORE the app's DbContext resolves, not just in a
+        // tracked identity map. AsNoTracking() forces a store round-trip.
+        using var scope = services.CreateScope();
+        var ctx = scope.ServiceProvider.GetRequiredService<EmployeeDbContext>();
+        GuardInMemory(ctx, nameof(StoreContains));
+        return ctx.Employees.AsNoTracking().Any(e => e.Email == email);
+    }
+
+    private static void GuardInMemory(EmployeeDbContext ctx, string caller)
+    {
+        if (!ctx.Database.IsInMemory())
+        {
+            throw new InvalidOperationException(
+                $"SAFETY: refusing to seed/read a non-InMemory database in test '{caller}'. " +
+                $"Provider: {ctx.Database.ProviderName}. " +
+                "Integration tests must only use the InMemory provider.");
         }
     }
 

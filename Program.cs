@@ -16,17 +16,18 @@ var windowInSeconds = builder.Configuration.GetValue<int>("RateLimiting:WindowIn
 var queueLimit = builder.Configuration.GetValue<int>("RateLimiting:QueueLimit", 0);
 
 // Fail fast: FixedWindowRateLimiterOptions throws ArgumentOutOfRangeException
-// for non-positive PermitLimit/Window (and negative QueueLimit), which would
+// for non-positive PermitLimit/Window (and negative QueueLimit), and the
+// limiter's internal replenish Timer cannot exceed ~49.7 days — both would
 // surface as a 500 on first request. Validate here with a clear message.
 if (permitLimit < 1)
 {
     throw new InvalidOperationException(
         $"Invalid RateLimiting:PermitLimit '{permitLimit}'. Expected an integer >= 1.");
 }
-if (windowInSeconds < 1)
+if (windowInSeconds < 1 || windowInSeconds > 86_400)
 {
     throw new InvalidOperationException(
-        $"Invalid RateLimiting:WindowInSeconds '{windowInSeconds}'. Expected an integer >= 1.");
+        $"Invalid RateLimiting:WindowInSeconds '{windowInSeconds}'. Expected an integer between 1 and 86400 (up to 24 hours).");
 }
 if (queueLimit < 0)
 {

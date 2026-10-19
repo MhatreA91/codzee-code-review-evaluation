@@ -114,11 +114,12 @@ public class RateLimitingCoverageTests2
     public async Task NullIp_Partition_Second_Request_Still_Served_Within_PermitLimit()
     {
         // PermitLimit=1 with the null-IP filter: the FIRST null-IP request
-        // consumes the single "unknown"-bucket permit (200), so a SECOND
-        // null-IP request in the same window must be 429. If null-IP
-        // requests each got a fresh bucket (partition key broken), the
-        // second request would wrongly return 200. Two bare 200s on an
-        // unlimited factory could never distinguish these.
+        // consumes the single "unknown"-bucket permit (200), so the SECOND
+        // null-IP request in the same window must be 429 — asserted
+        // immediately, with no retry loop. A loop-until-429 would also pass
+        // if the bucket wrongly held 2+ permits, hiding the regression.
+        // If null-IP requests each got a fresh bucket (partition key broken),
+        // the second request would wrongly return 200.
         // (The reverse direction — "unknown" != real-IP bucket — is locked
         // by RateLimiter_Policy_ReturnsLimiter_ForNullAndNonNullIp.)
         using var factory = new UnknownBucketLimitFactory();
@@ -128,13 +129,8 @@ public class RateLimitingCoverageTests2
         using var first = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
 
-        HttpStatusCode? last = null;
-        for (int i = 0; i < 5 && last != HttpStatusCode.TooManyRequests; i++)
-        {
-            using var r = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
-            last = r.StatusCode;
-        }
-        Assert.Equal(HttpStatusCode.TooManyRequests, last);
+        using var second = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
+        Assert.Equal(HttpStatusCode.TooManyRequests, second.StatusCode);
     }
 
     [Fact]
@@ -247,6 +243,7 @@ public class RateLimitingCoverageTests2
     [InlineData("RateLimiting:PermitLimit", "-5")]
     [InlineData("RateLimiting:WindowInSeconds", "0")]
     [InlineData("RateLimiting:WindowInSeconds", "-1")]
+    [InlineData("RateLimiting:WindowInSeconds", "86401")] // > 24h: internal replenish Timer would overflow
     [InlineData("RateLimiting:QueueLimit", "-1")]
     public void RateLimiting_NonPositive_Setting_Fails_Startup_Loudly(string key, string value)
     {
@@ -273,18 +270,9 @@ public class RateLimitingCoverageTests2
         using var first = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
 
-        HttpResponseMessage? rejected = null;
-        for (int i = 0; i < 10; i++)
-        {
-            var r = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
-            if (r.StatusCode == HttpStatusCode.TooManyRequests)
-            {
-                rejected?.Dispose();
-                rejected = r;
-                break;
-            }
-            r.Dispose();
-        }
+        // Strict: the very next request must be the 429 — no retry loop, so
+        // the Content-Type assertion below provably targets the 2nd request.
+        HttpResponseMessage? rejected = await client.GetAsync("/api/employees?pageNumber=1&pageSize=1");
 
         using (rejected)
         {
@@ -398,14 +386,10 @@ public class RateLimitingCoverageTests2
         using var first = await SendWithForwardedForAsync(client, "203.0.113.20");
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
 
-        HttpStatusCode? last = null;
-        for (int i = 0; i < 5 && last != HttpStatusCode.TooManyRequests; i++)
-        {
-            using var r = await SendWithForwardedForAsync(client, "203.0.113.20");
-            last = r.StatusCode;
-        }
-
-        Assert.Equal(HttpStatusCode.TooManyRequests, last);
+        // Strict: the very next same-IP request must be the 429 — no retry
+        // loop, so a bucket wrongly holding 2+ permits cannot hide.
+        using var second = await SendWithForwardedForAsync(client, "203.0.113.20");
+        Assert.Equal(HttpStatusCode.TooManyRequests, second.StatusCode);
     }
 
     private static async Task<HttpResponseMessage> SendWithForwardedForAsync(HttpClient client, string ip)
