@@ -19,17 +19,15 @@ public class ProgramIntegrationTests
         {
             using var scope = factory.Services.CreateScope();
             var context = scope.ServiceProvider.GetRequiredService<EmployeeDbContext>();
-            context.Database.EnsureDeleted();
+            // Fresh Guid-named InMemory store per factory, so no reset is needed:
+            // EnsureCreated materializes the store, then seed unconditionally.
             context.Database.EnsureCreated();
-            if (!context.Employees.Any())
-            {
-                context.Employees.AddRange(
-                    new Employee_Api.Models.Employee { FirstName = "Asha", LastName = "K", Email = "asha.k@example.com", Department = "HR", Salary = 60000, DateOfJoining = new DateTime(2022, 1, 1) },
-                    new Employee_Api.Models.Employee { FirstName = "Dev", LastName = "P", Email = "dev.p@example.com", Department = "Engineering", Salary = 60000, DateOfJoining = new DateTime(2022, 1, 1) },
-                    new Employee_Api.Models.Employee { FirstName = "Mira", LastName = "S", Email = "mira.s@example.com", Department = "HR", Salary = 60000, DateOfJoining = new DateTime(2022, 1, 1) },
-                    new Employee_Api.Models.Employee { FirstName = "Om", LastName = "T", Email = "om.t@example.com", Department = "Finance", Salary = 60000, DateOfJoining = new DateTime(2022, 1, 1) });
-                context.SaveChanges();
-            }
+            context.Employees.AddRange(
+                new Employee_Api.Models.Employee { FirstName = "Asha", LastName = "K", Email = "asha.k@example.com", Department = "HR", Salary = 60000, DateOfJoining = new DateTime(2022, 1, 1) },
+                new Employee_Api.Models.Employee { FirstName = "Dev", LastName = "P", Email = "dev.p@example.com", Department = "Engineering", Salary = 60000, DateOfJoining = new DateTime(2022, 1, 1) },
+                new Employee_Api.Models.Employee { FirstName = "Mira", LastName = "S", Email = "mira.s@example.com", Department = "HR", Salary = 60000, DateOfJoining = new DateTime(2022, 1, 1) },
+                new Employee_Api.Models.Employee { FirstName = "Om", LastName = "T", Email = "om.t@example.com", Department = "Finance", Salary = 60000, DateOfJoining = new DateTime(2022, 1, 1) });
+            context.SaveChanges();
 
             return (factory, client);
         }

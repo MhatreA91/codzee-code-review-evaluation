@@ -100,6 +100,18 @@ public class DbContextModelTests
     public void MigrationDesigner_BuildTargetModel_Executes()
     {
         var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
-        new InitialCreate().GetType().GetMethod("BuildTargetModel", flags)!.Invoke(new InitialCreate(), new object[] { new ModelBuilder() });
+        var builder = new ModelBuilder();
+        new InitialCreate().GetType().GetMethod("BuildTargetModel", flags)!.Invoke(new InitialCreate(), new object[] { builder });
+
+        // Assert on the built target model so an empty/wrong designer model
+        // cannot pass silently. Same shadow-entity caveat as the snapshot test:
+        // BuildTargetModel on a fresh migration yields no CLR type, so match by
+        // entity name and check structural + relational-annotation state.
+        var entity = Assert.Single(builder.Model.GetEntityTypes(), e => e.Name == "Employee_Api.Models.Employee");
+        Assert.Equal("EmployeeId", entity.FindPrimaryKey()!.Properties.Single().Name);
+        Assert.Equal("Employees", entity.GetTableName());
+        Assert.Contains(entity.GetIndexes(), i => i.IsUnique && i.Properties.Any(p => p.Name == "Email"));
+        Assert.Equal("decimal(18,2)", entity.FindProperty("Salary")!.FindAnnotation("Relational:ColumnType")?.Value);
+        Assert.True(entity.GetProperties().Count() >= 7);
     }}
 
