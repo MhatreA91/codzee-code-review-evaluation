@@ -174,7 +174,7 @@ public class RateLimitingCoverageTests
     }
 
     [Fact]
-    public async Task OnRejected_OmitsRetryAfter_WhenNoMetadata()
+    public async Task OnRejected_UsesWindowAsRetryAfter_WhenMetadataIsMissing()
     {
         using var factory = new TestApiFactory();
         EnsureSeeded(factory.Services);
@@ -186,7 +186,7 @@ public class RateLimitingCoverageTests
 
         await options.OnRejected!(rejected, CancellationToken.None);
 
-        Assert.False(httpContext.Response.Headers.ContainsKey("Retry-After"));
+        Assert.Equal("60", httpContext.Response.Headers.RetryAfter.ToString());
         Assert.Contains("Too many requests", ReadBody(httpContext));
     }
 

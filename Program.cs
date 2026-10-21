@@ -183,6 +183,14 @@ builder.Services.AddRateLimiter(options =>
                 Math.Ceiling(retryAfter.TotalSeconds)
                     .ToString(CultureInfo.InvariantCulture);
         }
+        else
+        {
+            // Sliding-window leases do not always provide RetryAfter metadata.
+            // Recommend waiting one full window so every rejected response
+            // still tells the client when to retry.
+            context.HttpContext.Response.Headers.RetryAfter =
+                windowInSeconds.ToString(CultureInfo.InvariantCulture);
+        }
 
         context.HttpContext.Response.ContentType = "text/plain; charset=utf-8";
         await context.HttpContext.Response.WriteAsync(
@@ -193,10 +201,14 @@ builder.Services.AddRateLimiter(options =>
     options.AddPolicy("EmployeeApiPolicy", httpContext =>
     {
         var clientIp = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-        return RateLimitPartition.GetFixedWindowLimiter(clientIp, _ => new FixedWindowRateLimiterOptions
+        return RateLimitPartition.GetSlidingWindowLimiter(clientIp, _ => new SlidingWindowRateLimiterOptions
         {
             PermitLimit = permitLimit,
-            Window = TimeSpan.FromSeconds(windowInSeconds),            
+            Window = TimeSpan.FromSeconds(windowInSeconds),
+            // Divide the window into at most 60 segments. For the one-minute
+            // Development limit this replenishes at one-second granularity,
+            // avoiding the boundary burst allowed by a fixed window.
+            SegmentsPerWindow = Math.Min(windowInSeconds, 60),
             QueueLimit = queueLimit,
             AutoReplenishment = true
     }); 
