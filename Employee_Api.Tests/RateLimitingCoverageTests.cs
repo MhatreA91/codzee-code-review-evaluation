@@ -174,7 +174,7 @@ public class RateLimitingCoverageTests
     }
 
     [Fact]
-    public async Task OnRejected_UsesWindowAsRetryAfter_WhenMetadataIsMissing()
+    public async Task OnRejected_DoesNotSetRetryAfter_WhenMetadataIsMissing()
     {
         using var factory = new TestApiFactory();
         EnsureSeeded(factory.Services);
@@ -186,7 +186,12 @@ public class RateLimitingCoverageTests
 
         await options.OnRejected!(rejected, CancellationToken.None);
 
-        Assert.Equal("60", httpContext.Response.Headers.RetryAfter.ToString());
+        // Retry-After is sent only when retry metadata is available: a
+        // sliding-window lease without metadata must not force a full-window
+        // wait (the old else-branch fallback set the whole windowInSeconds).
+        Assert.Equal(string.Empty, httpContext.Response.Headers.RetryAfter.ToString());
+        Assert.False(httpContext.Response.Headers.ContainsKey("Retry-After"),
+            "Retry-After must not be set when the lease has no retry metadata.");
         Assert.Contains("Too many requests", ReadBody(httpContext));
     }
 
@@ -242,12 +247,12 @@ public class RateLimitingCoverageTests
         {
             Assert.Equal(HttpStatusCode.TooManyRequests, rejected.StatusCode);
             Assert.Contains("Too many requests", body);
-            // The PR claims Retry-After is sent: lock it on the real 429.
-            Assert.NotNull(rejected);
-            Assert.True(rejected!.Headers.Contains("Retry-After"), "429 is missing the Retry-After header.");
-            var retryAfter = rejected.Headers.GetValues("Retry-After").FirstOrDefault();
-            Assert.True(int.TryParse(retryAfter, out var seconds) && seconds >= 0,
-                $"Retry-After '{retryAfter}' is not a non-negative integer.");
+            // A sliding-window rejection does not expose retrievable RetryAfter metadata
+            // (TryGetMetadata(MetadataName.RetryAfter) returns false), so no Retry-After
+            // header is emitted. The old else-branch fallback that forced a full-window
+            // wait has been removed (see Program.cs OnRejected).
+            Assert.False(rejected!.Headers.Contains("Retry-After"),
+                "429 must not include a Retry-After header when the lease has no retry metadata.");
         }
     }
 

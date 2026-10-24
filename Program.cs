@@ -176,20 +176,16 @@ builder.Services.AddRateLimiter(options =>
 
     options.OnRejected = async (context, cancellationToken) =>
     {
+        // Retry-After is sent only when retry metadata is available. A
+        // sliding-window lease frees a permit one segment later (often ~1s),
+        // so forcing a full-window wait here overstates the backoff and
+        // contradicts the "metadata available only" contract.
         if (context.Lease.TryGetMetadata(
             MetadataName.RetryAfter, out var retryAfter))
         {
             context.HttpContext.Response.Headers.RetryAfter =
                 Math.Ceiling(retryAfter.TotalSeconds)
                     .ToString(CultureInfo.InvariantCulture);
-        }
-        else
-        {
-            // Sliding-window leases do not always provide RetryAfter metadata.
-            // Recommend waiting one full window so every rejected response
-            // still tells the client when to retry.
-            context.HttpContext.Response.Headers.RetryAfter =
-                windowInSeconds.ToString(CultureInfo.InvariantCulture);
         }
 
         context.HttpContext.Response.ContentType = "text/plain; charset=utf-8";
