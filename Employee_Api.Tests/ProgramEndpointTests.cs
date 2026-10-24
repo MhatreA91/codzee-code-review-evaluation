@@ -4,6 +4,7 @@ using System.Text.Json;
 using Employee_Api.Data;
 using Employee_Api.DTOs;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Employee_Api.Tests;
@@ -12,6 +13,17 @@ public class ProgramIntegrationTests
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
 
+    private static void GuardAgainstRelationalProvider(EmployeeDbContext context, string caller)
+    {
+        if (!context.Database.IsInMemory())
+        {
+            throw new InvalidOperationException(
+                $"SAFETY: refusing to seed/reset a non-InMemory database in test '{caller}'. " +
+                $"Provider: {context.Database.ProviderName}. " +
+                "Integration tests must only use the InMemory provider.");
+        }
+    }
+
     private static (TestApiFactory factory, System.Net.Http.HttpClient client) CreateSeededClient(string environment = "Testing")
     {
         var factory = new TestApiFactory(environment);
@@ -19,6 +31,7 @@ public class ProgramIntegrationTests
         {
             using var scope = factory.Services.CreateScope();
             var context = scope.ServiceProvider.GetRequiredService<EmployeeDbContext>();
+            GuardAgainstRelationalProvider(context, nameof(CreateSeededClient));
             // Fresh Guid-named InMemory store per factory, so no reset is needed:
             // EnsureCreated materializes the store, then seed unconditionally.
             context.Database.EnsureCreated();
@@ -75,6 +88,75 @@ public class ProgramIntegrationTests
         using (var response = await client.GetAsync("/api/employees?pageNumber=0&pageSize=10"))
         {
             Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task CreateEmployee_InvalidEmail_Returns400_EndToEnd()
+    {
+        // End-to-end 400 for invalid input. Because EmployeesController is
+        // [ApiController], MVC's automatic model validation rejects the request
+        // with an RFC 7807 ValidationProblemDetails BEFORE the Create action
+        // runs — so this test proves the WIRE contract (400 + errors.email),
+        // not the controller's own code. The controller's explicit
+        // ValidationProblem(ModelState) branch is defense-in-depth and is
+        // covered directly by EmployeesControllerWriteTests.Create_ValidationProblem_WhenInvalid.
+        var (factory, client) = CreateSeededClient();
+        using (factory)
+        using (client)
+        using (var response = await client.PostAsJsonAsync("/api/employees", new
+        {
+            firstName = "Bad",
+            lastName = "Email",
+            email = "not-an-email",
+            department = "HR",
+            salary = 1,
+            dateOfJoining = new DateTime(2022, 1, 1)
+        }))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            var body = await response.Content.ReadAsStringAsync();
+            // Assert the framework's ValidationProblemDetails payload (status +
+            // errors.email) rather than a bare substring, so the test pins the
+            // auto-validation 400 contract it actually exercises.
+            using var doc = JsonDocument.Parse(body);
+            Assert.Equal(400, doc.RootElement.GetProperty("status").GetInt32());
+            Assert.True(
+                doc.RootElement.GetProperty("errors").EnumerateObject()
+                    .Any(e => e.Name.Contains("email", StringComparison.OrdinalIgnoreCase)),
+                $"Expected an errors entry for email. Body: {body}");
+        }
+    }
+
+    [Fact]
+    public async Task UpdateEmployee_InvalidEmail_Returns400_EndToEnd()
+    {
+        // End-to-end 400 for invalid input on Update. As with Create, the
+        // [ApiController] auto-validation short-circuits before the Update
+        // action runs: this proves the wire 400 + errors.email contract, while
+        // the controller's explicit ValidationProblem(ModelState) branch is
+        // covered by EmployeesControllerWriteTests.Update_Ok_NotFound_Conflict_Invalid.
+        var (factory, client) = CreateSeededClient();
+        using (factory)
+        using (client)
+        using (var response = await client.PutAsJsonAsync("/api/employees/1", new
+        {
+            firstName = "Asha",
+            lastName = "K",
+            email = "not-an-email",
+            department = "HR",
+            salary = 60000,
+            dateOfJoining = new DateTime(2022, 1, 1)
+        }))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            Assert.Equal(400, doc.RootElement.GetProperty("status").GetInt32());
+            Assert.True(
+                doc.RootElement.GetProperty("errors").EnumerateObject()
+                    .Any(e => e.Name.Contains("email", StringComparison.OrdinalIgnoreCase)),
+                $"Expected an errors entry for email. Body: {body}");
         }
     }
 

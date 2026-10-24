@@ -9,6 +9,38 @@ using Microsoft.Extensions.DependencyInjection;
 namespace Employee_Api.Tests;
 
 /// <summary>
+/// Shared helper: replaces the SQL Server <see cref="EmployeeDbContext"/>
+/// registration (which Program.cs now always registers) with an isolated
+/// InMemory database. Used by every integration-test factory, including the
+/// private factories in the rate-limiting test classes.
+/// </summary>
+public static class TestDbSwap
+{
+    public static void ReplaceWithInMemory(IServiceCollection services, string dbName)
+    {
+        // Remove every EF Core registration (options + context + provider
+        // singletons such as the SqlServer internal provider); removing only
+        // DbContextOptions leaves the SqlServer provider cached and EF throws
+        // "multiple database providers".
+        bool IsEf(ServiceDescriptor d) =>
+            d.ServiceType.FullName?.Contains("EntityFrameworkCore") == true
+            || d.ImplementationType?.FullName?.Contains("EntityFrameworkCore") == true
+            || d.ImplementationInstance?.GetType().FullName?.Contains("EntityFrameworkCore") == true
+            || d.ServiceType == typeof(DbContextOptions)
+            || d.ServiceType == typeof(DbContextOptions<EmployeeDbContext>)
+            || d.ServiceType == typeof(EmployeeDbContext);
+
+        foreach (var d in services.Where(IsEf).ToList())
+        {
+            services.Remove(d);
+        }
+
+        services.AddDbContext<EmployeeDbContext>(options =>
+            options.UseInMemoryDatabase(dbName));
+    }
+}
+
+/// <summary>
 /// Shared <see cref="WebApplicationFactory{Program}"/> for integration tests.
 /// Lives in its own file so it is discoverable at compile time.
 /// This factory owns the test-only InMemory swap: Program.cs always registers
@@ -56,28 +88,9 @@ public sealed class TestApiFactory : WebApplicationFactory<Program>
                 o => o.HttpsPort = int.Parse(_httpsPort)));
         }
 
-        // TestApiFactory owns the InMemory swap (Program.cs always registers
-        // SQL Server). Remove every EF Core registration (options + context +
-        // provider singletons such as the SqlServer internal provider); removing
-        // only DbContextOptions leaves the SqlServer provider cached and EF throws
-        // "multiple database providers".
+        // InMemory swap owned by the factory (Program.cs always registers
+        // SQL Server). See TestDbSwap.
         builder.ConfigureServices(services =>
-        {
-            bool IsEf(ServiceDescriptor d) =>
-                d.ServiceType.FullName?.Contains("EntityFrameworkCore") == true
-                || d.ImplementationType?.FullName?.Contains("EntityFrameworkCore") == true
-                || d.ImplementationInstance?.GetType().FullName?.Contains("EntityFrameworkCore") == true
-                || d.ServiceType == typeof(DbContextOptions)
-                || d.ServiceType == typeof(DbContextOptions<EmployeeDbContext>)
-                || d.ServiceType == typeof(EmployeeDbContext);
-
-            foreach (var d in services.Where(IsEf).ToList())
-            {
-                services.Remove(d);
-            }
-
-            services.AddDbContext<EmployeeDbContext>(options =>
-                options.UseInMemoryDatabase(DbName));
-        });
+            TestDbSwap.ReplaceWithInMemory(services, DbName));
     }
 }

@@ -1,7 +1,10 @@
 using Employee_Api.Controllers;
 using Employee_Api.DTOs;
 using Employee_Api.Services;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.DependencyInjection;
 using Moq;
 
 namespace Employee_Api.Tests;
@@ -25,6 +28,44 @@ public class EmployeesControllerWriteTests
         DateOfJoining = new DateTime(2022, 1, 1)
     };
 
+    /// <summary>
+    /// Builds a controller wired to REAL MVC services (including
+    /// <c>ProblemDetailsFactory</c>) via a service-backed
+    /// <see cref="ControllerContext"/>, so <c>ValidationProblem(ModelState)</c>
+    /// produces the same status-carrying result the real pipeline would. The
+    /// tests then assert the REAL status through the reviewer's suggested
+    /// path: <c>ExecuteResultAsync</c> with a controller context — a 500
+    /// <see cref="ObjectResult"/> regression cannot pass because its wire
+    /// status would not be 400.
+    /// </summary>
+    private static (EmployeesController Controller, IServiceProvider Services) CreateController(IEmployeeService service)
+    {
+        var services = new ServiceCollection().AddLogging().AddMvcCore().Services.BuildServiceProvider();
+        var httpContext = new DefaultHttpContext { RequestServices = services };
+        var ctl = new EmployeesController(service)
+        {
+            ControllerContext = new ControllerContext(new ActionContext(
+                httpContext, new RouteData(), new Microsoft.AspNetCore.Mvc.Controllers.ControllerActionDescriptor()))
+        };
+        return (ctl, services);
+    }
+
+    /// <summary>
+    /// Executes the CONTROLLER'S OWN result (not a framework constant) and
+    /// asserts the real wire status is 400 plus the error payload key.
+    /// </summary>
+    private static async Task AssertWire400Async(ObjectResult result, string errorKey, IServiceProvider services)
+    {
+        var details = Assert.IsType<ValidationProblemDetails>(result.Value);
+        Assert.True(details.Errors.ContainsKey(errorKey));
+
+        var httpContext = new DefaultHttpContext { RequestServices = services };
+        var actionContext = new ActionContext(
+            httpContext, new RouteData(), new Microsoft.AspNetCore.Mvc.Controllers.ControllerActionDescriptor());
+        await result.ExecuteResultAsync(actionContext);
+        Assert.Equal(StatusCodes.Status400BadRequest, httpContext.Response.StatusCode);
+    }
+
     [Fact]
     public async Task Create_Conflict_OnDuplicate()
     {
@@ -38,16 +79,14 @@ public class EmployeesControllerWriteTests
     [Fact]
     public async Task Create_ValidationProblem_WhenInvalid()
     {
-        var ctl = new EmployeesController(new Mock<IEmployeeService>().Object);
+        var (ctl, services) = CreateController(new Mock<IEmployeeService>().Object);
         ctl.ModelState.AddModelError("Email", "bad");
         var res = await ctl.Create(C(), default);
-        // ValidationProblem(ModelState) returns an ObjectResult whose StatusCode
-        // is null pre-execution; the 400 contract lives on the payload's
-        // ValidationProblemDetails.Status. Assert that, so a 500 ObjectResult
-        // regression cannot pass silently.
-        var result = Assert.IsType<ObjectResult>(res.Result);
-        var details = Assert.IsType<ValidationProblemDetails>(result.Value);
-        Assert.True(details.Errors.ContainsKey("Email"));
+        // Asserts the REAL status through ExecuteResultAsync on the
+        // controller's own result — a 500 ObjectResult regression fails
+        // because its wire status would not be 400.
+        var result = Assert.IsAssignableFrom<ObjectResult>(res.Result);
+        await AssertWire400Async(result, "Email", services);
     }
 
     [Fact]
@@ -60,13 +99,13 @@ public class EmployeesControllerWriteTests
             .ReturnsAsync((EmployeeDto?)null);
         svc.Setup(s => s.UpdateAsync(3, It.IsAny<UpdateEmployeeDto>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("dup"));
-        var ctl = new EmployeesController(svc.Object);
+        var (ctl, services) = CreateController(svc.Object);
         Assert.IsType<OkObjectResult>((await ctl.Update(1, U(), default)).Result);
         Assert.IsType<NotFoundObjectResult>((await ctl.Update(2, U(), default)).Result);
         Assert.IsType<ConflictObjectResult>((await ctl.Update(3, U(), default)).Result);
         ctl.ModelState.AddModelError("x", "bad");
-        var invalid = Assert.IsType<ObjectResult>((await ctl.Update(1, U(), default)).Result);
-        Assert.True(Assert.IsType<ValidationProblemDetails>(invalid.Value).Errors.ContainsKey("x"));
+        var invalid = Assert.IsAssignableFrom<ObjectResult>((await ctl.Update(1, U(), default)).Result);
+        await AssertWire400Async(invalid, "x", services);
     }
 
     [Fact]

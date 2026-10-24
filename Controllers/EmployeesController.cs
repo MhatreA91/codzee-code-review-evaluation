@@ -1,12 +1,13 @@
 using Employee_Api.DTOs;
 using Employee_Api.Services;
 using Microsoft.AspNetCore.Mvc;
-
+using Microsoft.AspNetCore.RateLimiting;
 namespace Employee_Api.Controllers;
 
 /// <summary>
 /// Employee CRUD endpoints. Uses DTOs only — entity never exposed.
 /// </summary>
+[EnableRateLimiting("EmployeeApiPolicy")]
 [ApiController]
 [Route("api/[controller]")]
 public class EmployeesController : ControllerBase
@@ -63,6 +64,9 @@ public class EmployeesController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<EmployeeDto>> Create([FromBody] CreateEmployeeDto dto, CancellationToken cancellationToken)
     {
+        // Defense-in-depth: [ApiController] auto-validates ModelState and
+        // returns 400 before the action runs, so this branch is unreachable
+        // over HTTP — covered by EmployeesControllerWriteTests, not the wire tests.
         if (!ModelState.IsValid)
         {
             return ValidationProblem(ModelState);
@@ -88,6 +92,9 @@ public class EmployeesController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<EmployeeDto>> Update(int id, [FromBody] UpdateEmployeeDto dto, CancellationToken cancellationToken)
     {
+        // Defense-in-depth: [ApiController] auto-validates ModelState and
+        // returns 400 before the action runs, so this branch is unreachable
+        // over HTTP — covered by EmployeesControllerWriteTests, not the wire tests.
         if (!ModelState.IsValid)
         {
             return ValidationProblem(ModelState);
